@@ -320,12 +320,21 @@ def _insert_identity_link(
 # CLI
 # ---------------------------------------------------------------------------
 
-def run(source_system: str = "IMPECT", dry_run: bool = True) -> dict[str, int]:
+def run(
+    source_system: str = "IMPECT",
+    dry_run: bool = True,
+    run_id: Optional[int] = None,
+) -> dict[str, int]:
     """
     Entry point. Returns per-outcome counts.
 
     dry_run=True: read everything, classify, print a report, write nothing.
-    dry_run=False: open an INGESTION_RUNS row, apply decisions, commit.
+    dry_run=False, run_id=None:
+        Open our own CORE.INGESTION_RUNS row, apply, mark SUCCESS, commit.
+        Used when matcher.py is invoked standalone via the CLI.
+    dry_run=False, run_id given:
+        Apply inside the caller's envelope. Caller (typically the
+        orchestrator) is responsible for opening and closing the run row.
     """
     conn = _snowflake.get_connection()
     try:
@@ -349,30 +358,39 @@ def run(source_system: str = "IMPECT", dry_run: bool = True) -> dict[str, int]:
                 _print_dry_run_report(decisions, counts)
                 return counts
 
-            # Live apply: open an INGESTION_RUNS envelope and write inside it.
-            cur.execute(
-                """
-                INSERT INTO CAFC_DB.CORE.INGESTION_RUNS (SOURCE_SYSTEM, TRIGGERED_BY, NOTES)
-                VALUES (%(src)s, %(by)s, %(notes)s)
-                """,
-                {"src": source_system, "by": "matcher.run", "notes": "identity matcher live apply"},
-            )
-            cur.execute("SELECT MAX(RUN_ID) FROM CAFC_DB.CORE.INGESTION_RUNS")
-            run_id = int(cur.fetchone()[0])
-            log.info("Opened INGESTION_RUNS.RUN_ID = %d", run_id)
+            # Live apply path. Two modes:
+            #   - run_id passed in: write inside caller's envelope; caller
+            #     handles open + close + commit.
+            #   - run_id is None: matcher owns the envelope.
+            owns_envelope = run_id is None
+
+            if owns_envelope:
+                cur.execute(
+                    """
+                    INSERT INTO CAFC_DB.CORE.INGESTION_RUNS (SOURCE_SYSTEM, TRIGGERED_BY, NOTES)
+                    VALUES (%(src)s, %(by)s, %(notes)s)
+                    """,
+                    {"src": source_system, "by": "matcher.run",
+                     "notes": "identity matcher live apply"},
+                )
+                cur.execute("SELECT MAX(RUN_ID) FROM CAFC_DB.CORE.INGESTION_RUNS")
+                run_id = int(cur.fetchone()[0])
+                log.info("Opened INGESTION_RUNS.RUN_ID = %d", run_id)
 
             applied = apply_decisions(cur, decisions, run_id=run_id)
 
-            cur.execute(
-                """
-                UPDATE CAFC_DB.CORE.INGESTION_RUNS
-                   SET STATUS = 'SUCCESS', FINISHED_AT = CURRENT_TIMESTAMP()
-                 WHERE RUN_ID = %(rid)s
-                """,
-                {"rid": run_id},
-            )
-            conn.commit()
-            log.info("Applied: %s", applied)
+            if owns_envelope:
+                cur.execute(
+                    """
+                    UPDATE CAFC_DB.CORE.INGESTION_RUNS
+                       SET STATUS = 'SUCCESS', FINISHED_AT = CURRENT_TIMESTAMP()
+                     WHERE RUN_ID = %(rid)s
+                    """,
+                    {"rid": run_id},
+                )
+                conn.commit()
+
+            log.info("Applied (RUN_ID=%d): %s", run_id, applied)
             return applied
     finally:
         conn.close()
