@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# Secrets and credentials (vendored from cafc_utils)
+.env
+.env.local
+**/keys/
+**/.impect_token_cache.json
+
+# Large extracted data — keep on disk, don't commit
+python/extract/impect/*.csv
+python/extract/impect/downloads/
+
+# dbt
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+dbt/profiles.yml
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Claude Code per-user settings
+**/.claude/settings.local.json

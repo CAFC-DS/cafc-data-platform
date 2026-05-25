@@ -1,0 +1,188 @@
+================================================================================
+CAFC UTILS - PROJECT SUMMARY
+Impect API to Snowflake ETL Utilities
+================================================================================
+
+TEST RESULTS:
+-------------
+The code structure is working correctly! All functions properly validate that
+credentials are set before attempting API calls.
+
+To use with real data:
+1. Copy .env.example to .env
+2. Add your Impect username and password
+3. Run the test again: python test_api.py
+
+================================================================================
+PROJECT STRUCTURE
+================================================================================
+
+cafc_utils/
+├── config.py                    # Configuration and environment variables
+├── impect_api.py                # Functions to fetch data from Impect API
+├── snowflake_loader.py          # Functions to load data to Snowflake
+├── requirements.txt             # Python dependencies
+├── .env.example                 # Environment variables template
+├── .gitignore                   # Git ignore rules
+├── README.md                    # Documentation
+├── test_api.py                  # Test script for API functions
+└── test_output.txt              # Test results
+
+================================================================================
+FILE CONTENTS
+================================================================================
+
+--------------------------------------------------------------------------------
+FILE: config.py
+--------------------------------------------------------------------------------
+"""
+Configuration for Impect API and Snowflake connections
+"""
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Impect API Configuration
+IMPECT_BASE_URL = os.getenv("IMPECT_BASE_URL", "https://api.impect.com")
+IMPECT_TOKEN_URL = os.getenv("IMPECT_TOKEN_URL", "https://login.impect.com/auth/realms/production/protocol/openid-connect/token")
+IMPECT_USERNAME = os.getenv("IMPECT_USERNAME")
+IMPECT_PASSWORD = os.getenv("IMPECT_PASSWORD")
+
+# Default iteration ID
+DEFAULT_ITERATION_ID = 1410
+
+# Snowflake Configuration
+SNOWFLAKE_ACCOUNT = os.getenv("SNOWFLAKE_ACCOUNT")
+SNOWFLAKE_USER = os.getenv("SNOWFLAKE_USER")
+SNOWFLAKE_PASSWORD = os.getenv("SNOWFLAKE_PASSWORD")
+SNOWFLAKE_DATABASE = os.getenv("SNOWFLAKE_DATABASE")
+SNOWFLAKE_SCHEMA = os.getenv("SNOWFLAKE_SCHEMA", "PUBLIC")
+SNOWFLAKE_WAREHOUSE = os.getenv("SNOWFLAKE_WAREHOUSE")
+SNOWFLAKE_ROLE = os.getenv("SNOWFLAKE_ROLE")
+
+# Request settings
+REQUEST_TIMEOUT = 30
+MAX_RETRIES = 3
+
+# Token cache settings
+TOKEN_CACHE_FILE = ".impect_token_cache.json"
+TOKEN_EXPIRY_HOURS = 24
+
+--------------------------------------------------------------------------------
+FILE: .env.example
+--------------------------------------------------------------------------------
+# Impect API Configuration
+IMPECT_BASE_URL=https://api.impect.com
+IMPECT_TOKEN_URL=https://login.impect.com/auth/realms/production/protocol/openid-connect/token
+IMPECT_USERNAME=your_username@example.com
+IMPECT_PASSWORD=your_password_here
+
+# Snowflake Configuration
+SNOWFLAKE_ACCOUNT=your_account.region
+SNOWFLAKE_USER=your_username
+SNOWFLAKE_PASSWORD=your_password
+SNOWFLAKE_DATABASE=your_database
+SNOWFLAKE_SCHEMA=PUBLIC
+SNOWFLAKE_WAREHOUSE=your_warehouse
+SNOWFLAKE_ROLE=your_role
+
+--------------------------------------------------------------------------------
+FILE: requirements.txt
+--------------------------------------------------------------------------------
+requests>=2.31.0
+python-dotenv>=1.0.0
+snowflake-connector-python>=3.6.0
+pandas>=2.0.0
+
+================================================================================
+KEY FEATURES IMPLEMENTED
+================================================================================
+
+✓ OAuth2 Authentication
+  - Automatic token fetching using username/password
+  - Token caching for 24 hours in .impect_token_cache.json
+  - Automatic token refresh when expired
+
+✓ Rate Limiting
+  - Handles 429 errors with 1-second delays
+  - Exponential backoff for failed requests
+
+✓ API Endpoints (All default to iteration 1410)
+  - get_iterations() - Get all iterations
+  - get_matches(iteration_id) - Get matches
+  - get_squads(iteration_id) - Get squads
+  - get_players(iteration_id) - Get players
+  - get_coaches(iteration_id) - Get coaches
+  - get_stadiums(iteration_id) - Get stadiums
+  - get_countries() - Get all countries
+
+✓ Snowflake Loading
+  - load_json_to_table() - Load JSON to table
+  - create_table_from_json() - Create new table with data
+  - append_to_table() - Append to existing table
+  - load_dataframe_to_table() - Load pandas DataFrame
+
+✓ Simple Procedural Style
+  - No complex classes or patterns
+  - Easy to understand and modify
+  - Clear function names
+
+================================================================================
+USAGE EXAMPLES
+================================================================================
+
+Example 1: Fetch Data from Impect
+----------------------------------
+from impect_api import get_matches, get_players
+
+# Get matches for iteration 1410 (default)
+matches = get_matches()
+
+# Get players for a specific iteration
+players = get_players(iteration_id=1234)
+
+
+Example 2: Load to Snowflake
+-----------------------------
+from snowflake_loader import create_table_from_json
+
+# Create table and load data
+create_table_from_json(matches, 'impect_matches')
+
+
+Example 3: Complete ETL Pipeline
+---------------------------------
+from impect_api import get_matches, get_players
+from snowflake_loader import create_table_from_json
+
+# Extract
+print("Fetching data from Impect...")
+matches = get_matches(iteration_id=1410)
+players = get_players(iteration_id=1410)
+
+# Load
+print("Loading to Snowflake...")
+create_table_from_json(matches, 'impect_matches')
+create_table_from_json(players, 'impect_players')
+
+print("ETL complete!")
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Install dependencies:
+   pip install -r requirements.txt
+
+2. Set up credentials:
+   cp .env.example .env
+   # Edit .env with your actual credentials
+
+3. Test the API:
+   python test_api.py
+
+4. Build your ETL pipeline using the provided functions!
+
+================================================================================
