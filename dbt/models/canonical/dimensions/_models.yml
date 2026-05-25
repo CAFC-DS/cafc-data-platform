@@ -1,0 +1,47 @@
+version: 2
+
+# ============================================================================
+# Canonical dimensions: one row per logical entity (squad, competition,
+# season). Built nightly from staging. Materialized as tables for fast joins.
+# ============================================================================
+
+models:
+
+  - name: core_squads
+    description: "One row per club / national team. Deduped across iterations; cafc_squad_id is a placeholder for impect_squad_id until squad identity resolution lands (sibling of plan §2.6 player matcher)."
+    columns:
+      - name: cafc_squad_id
+        description: "Canonical squad surrogate. = impect_squad_id today; will become a stable identity later."
+        tests: [unique, not_null]
+      - name: impect_squad_id
+        tests: [unique, not_null]
+      - name: squad_name
+        tests: [not_null]
+      - name: squad_type
+      - name: gender
+
+  - name: core_competitions
+    description: "One row per competition_id (e.g. EFL Championship). Deduped across seasons; keeps the most-recent name."
+    columns:
+      - name: cafc_competition_id
+        tests: [unique, not_null]
+      - name: impect_competition_id
+        tests: [unique, not_null]
+      - name: competition_name
+        tests: [not_null]
+
+  - name: core_seasons
+    description: "One row per (competition_id, season). An IMPECT iteration corresponds exactly to one (competition, season) instance."
+    columns:
+      - name: cafc_season_id
+        description: "Canonical season surrogate. = iteration_id today (IMPECT is sole source)."
+        tests: [unique, not_null]
+      - name: cafc_competition_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('core_competitions')
+                field: cafc_competition_id
+      - name: season_name
+        tests: [not_null]

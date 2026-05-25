@@ -1,0 +1,170 @@
+version: 2
+
+# ============================================================================
+# IMPECT_RAW source tables.
+#
+# These declarations let staging models reference {{ source('impect', 'players') }}
+# instead of hard-coding CAFC_DB.IMPECT_RAW.PLAYERS. dbt then knows the source
+# table is upstream of the staging view in the DAG, and `dbt source freshness`
+# can flag stale extracts.
+#
+# Freshness is left off most tables for now because IMPECT_RAW tables don't
+# carry a per-row loaded_at timestamp — they're full-replaced by the Python
+# extractor. Adding a `_LOADED_AT` column to the loader is a planned follow-up
+# (plan §2.6 orchestrator changes) at which point freshness can be uniform.
+# ITERATIONS has LASTCHANGETIMESTAMP from IMPECT itself, so it's wired in
+# below as an early example.
+# ============================================================================
+
+sources:
+  - name: impect
+    description: "Raw IMPECT API extracts. Owned by python/extract/impect/. Full-replaced on every extractor run."
+    database: CAFC_DB
+    schema: IMPECT_RAW
+
+    tables:
+
+      # ----------------------------------------------------------------------
+      # Reference / dimension tables (small, slowly changing).
+      # ----------------------------------------------------------------------
+
+      - name: COUNTRIES
+        description: "ISO countries with IMPECT-side IDs. Used to resolve player and squad nationalities."
+        columns:
+          - name: ID
+            description: "IMPECT country ID."
+            tests: [unique, not_null]
+          - name: NAME
+
+      - name: ITERATIONS
+        description: "Competition × season instances (e.g. 'EFL Championship 2025/26'). The COMPETITION.* columns are dot-named from JSON flattening and need to be quoted in SQL."
+        config:
+          freshness:
+            warn_after: { count: 24, period: hour }
+            error_after: { count: 72, period: hour }
+          loaded_at_field: "TRY_TO_TIMESTAMP_NTZ(LASTCHANGETIMESTAMP)"
+        columns:
+          - name: ID
+            tests: [unique, not_null]
+          - name: SEASON
+          - name: DATAVERSION
+          - name: LASTCHANGETIMESTAMP
+            description: "ISO timestamp string of last change in IMPECT. Cast to TIMESTAMP_NTZ in staging."
+          - name: '"COMPETITION.ID"'
+            description: "Dot-named column from JSON flattening; reference with double-quotes."
+          - name: '"COMPETITION.NAME"'
+
+      - name: SQUADS
+        description: "Clubs and national teams as IMPECT knows them."
+        columns:
+          - name: ID
+            tests: [unique, not_null]
+          - name: NAME
+          - name: COUNTRYID
+          - name: TYPE
+            description: "e.g. CLUB / NATIONAL_TEAM."
+
+      - name: STADIUMS
+        description: "IMPECT stadium reference."
+        columns:
+          - name: ID
+            tests: [unique, not_null]
+
+      - name: COACHES
+        description: "IMPECT coach reference."
+        columns:
+          - name: ID
+            tests: [unique, not_null]
+
+      # ----------------------------------------------------------------------
+      # Player and match tables.
+      # ----------------------------------------------------------------------
+
+      - name: PLAYERS
+        description: "IMPECT players. The source-of-truth for new player identities arriving through the matcher in plan §2.6."
+        columns:
+          - name: ID
+            description: "IMPECT player ID. EXTERNAL_ID for the identity matcher (SOURCE_SYSTEM='IMPECT')."
+            tests: [unique, not_null]
+          - name: FIRSTNAME
+          - name: LASTNAME
+          - name: COMMONNAME
+            description: "Used by the matcher together with BIRTHDATE for identity resolution."
+          - name: BIRTHDATE
+            description: "ISO date string; cast to DATE in staging."
+          - name: COUNTRYIDS
+            description: "VARIANT array of IMPECT country IDs. Expand to many rows in canonical dim if multi-nationality matters."
+          - name: CURRENTSQUADID
+            description: "FLOAT in raw because IMPECT serializes NULLs as NaN; staging casts to NUMBER."
+
+      - name: MATCHES
+        description: "IMPECT fixtures across all iterations. The MATCHDAY.* columns are dot-named from JSON flattening."
+        columns:
+          - name: ID
+            tests: [unique, not_null]
+          - name: ITERATIONID
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('impect', 'ITERATIONS')
+                    field: ID
+          - name: HOMESQUADID
+          - name: AWAYSQUADID
+          - name: SCHEDULEDDATE
+            description: "ISO timestamp string; cast to TIMESTAMP_NTZ in staging."
+          - name: AVAILABLE
+            description: "Whether IMPECT has computed KPIs for this match yet."
+
+      # ----------------------------------------------------------------------
+      # KPI fact tables — the big ones. Driven by championship-scoped extracts
+      # today; will broaden when other competitions are pulled.
+      # ----------------------------------------------------------------------
+
+      - name: CHAMPIONSHIP_MATCH_INDEX
+        description: "Index of championship matches that have been extracted (header rows)."
+
+      - name: CHAMPIONSHIP_MATCH_INFO
+        description: "Per-match metadata for the championship subset (1:1 with CHAMPIONSHIP_MATCH_INDEX)."
+
+      - name: CHAMPIONSHIP_PLAYER_KPIS
+        description: "Per-match per-player KPI values. The primary input to canonical CORE.PLAYER_FIXTURE_KPIS (plan §2.5)."
+        columns:
+          - name: MATCHID
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('impect', 'MATCHES')
+                    field: ID
+          - name: PLAYERID
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('impect', 'PLAYERS')
+                    field: ID
+          - name: SQUADID
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('impect', 'SQUADS')
+                    field: ID
+          - name: KPIID
+            description: "FK to KPI definitions (will be a dbt seed in dbt/seeds/kpi_definitions.csv)."
+          - name: VALUE
+
+      - name: CHAMPIONSHIP_SQUAD_KPIS
+        description: "Per-match per-squad KPI values. Aggregated counterpart to CHAMPIONSHIP_PLAYER_KPIS."
+        columns:
+          - name: MATCHID
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('impect', 'MATCHES')
+                    field: ID
+          - name: SQUADID
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('impect', 'SQUADS')
+                    field: ID
+          - name: KPIID
+          - name: VALUE

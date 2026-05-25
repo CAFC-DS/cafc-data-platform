@@ -1,0 +1,59 @@
+# ============================================================================
+#  profiles.yml.example — copy to ~/.dbt/profiles.yml (or to dbt/profiles.yml,
+#  which is gitignored), fill in the env vars, and dbt will find it.
+#
+#  Auth: RSA key pair (matches python/extract/impect/snowflake_loader.py).
+#
+#  Environment variables this file expects:
+#    SNOWFLAKE_ACCOUNT          e.g. TDAPVGQ-SL30706
+#    SNOWFLAKE_USER             your username, e.g. HUMARJI
+#    SNOWFLAKE_PRIVATE_KEY_PATH absolute path to the unencrypted private key
+#    SNOWFLAKE_WAREHOUSE        e.g. DEVELOPMENT_WH
+#    SNOWFLAKE_DATABASE         CAFC_DB
+#    SNOWFLAKE_ROLE             e.g. DATA_PLATFORM_ROLE (or DEV_ROLE today)
+#    DBT_DEV_SCHEMA             your personal dev schema, e.g. DEV_HUMARJI
+#
+#  Recommended local pattern: keep these in python/extract/impect/.env and
+#  source them before running dbt:
+#    set -a && source python/extract/impect/.env && set +a
+#  (Or wire it up with direnv via a .envrc at the repo root.)
+#
+#  Two targets:
+#    dev   default; writes into prefixed schemas (e.g. CORE_DEV_HUMARJI) so
+#          your work doesn't collide with anyone else's.
+#    prod  used by nightly CI; writes into bare schemas (CORE, APP_COMPAT,
+#          IMPECT_RAW_STAGING). Reserved for the data platform service account.
+# ============================================================================
+
+cafc_data_platform:
+  target: dev
+
+  outputs:
+
+    dev:
+      type: snowflake
+      account:    "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user:       "{{ env_var('SNOWFLAKE_USER') }}"
+      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH') }}"
+      role:       "{{ env_var('SNOWFLAKE_ROLE', 'DEV_ROLE') }}"
+      database:   "{{ env_var('SNOWFLAKE_DATABASE', 'CAFC_DB') }}"
+      warehouse:  "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
+      schema:     "{{ env_var('DBT_DEV_SCHEMA') }}"   # your personal dev schema, e.g. DEV_HUMARJI
+      threads: 4
+      client_session_keep_alive: false
+      query_tag: "dbt:dev:{{ env_var('USER', 'unknown') }}"
+
+    prod:
+      type: snowflake
+      account:    "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user:       "{{ env_var('SNOWFLAKE_USER') }}"
+      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH') }}"
+      role:       "{{ env_var('SNOWFLAKE_ROLE', 'DATA_PLATFORM_ROLE') }}"
+      database:   "{{ env_var('SNOWFLAKE_DATABASE', 'CAFC_DB') }}"
+      warehouse:  "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
+      schema:     PROD       # not the literal target schema — macros/generate_schema_name.sql
+                             # short-circuits when target.name == 'prod' and uses the model's
+                             # +schema config directly (CORE, APP_COMPAT, IMPECT_RAW_STAGING).
+      threads: 8
+      client_session_keep_alive: false
+      query_tag: "dbt:prod:ci-{{ env_var('GITHUB_RUN_ID', 'manual') }}"

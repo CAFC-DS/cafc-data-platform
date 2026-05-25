@@ -1,0 +1,84 @@
+# ============================================================================
+#  dbt_project.yml
+#  dbt project for the CAFC canonical data platform.
+#
+#  Layered structure (plan §2.5):
+#    staging/        typed views over *_RAW landing zones
+#    canonical/
+#      dimensions/   small reference tables (squads, competitions, seasons)
+#      facts/        incremental KPI tables (player_fixture_kpis, player_season_kpis)
+#    app_compat/     legacy-shape views the recruitment-platform reads
+#
+#  Tags align with the orchestrator's selection (plan §2.7):
+#    dbt build --select tag:staging
+#    dbt build --select tag:dimensions tag:facts tag:app_compat
+#
+#  Schema naming is handled by macros/generate_schema_name.sql:
+#    prod target  →  raw schema names      (CORE, APP_COMPAT, IMPECT_RAW_STAGING)
+#    other targets → custom_<target_schema> (CORE_DEV_HUMARJI etc.)
+# ============================================================================
+
+name: cafc_data_platform
+version: 0.1.0
+config-version: 2
+
+profile: cafc_data_platform
+
+model-paths:    ["models"]
+seed-paths:     ["seeds"]
+snapshot-paths: ["snapshots"]
+test-paths:     ["tests"]
+macro-paths:    ["macros"]
+
+target-path: target
+clean-targets:
+  - target
+  - dbt_packages
+  - logs
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+models:
+  cafc_data_platform:
+
+    staging:
+      +materialized: view
+      +schema: IMPECT_RAW_STAGING   # views live alongside the raw they wrap
+      +tags: [staging]
+      impect:
+        +tags: [staging, impect]
+
+    canonical:
+      dimensions:
+        +materialized: table
+        +schema: CORE
+        +tags: [dimensions, canonical]
+      facts:
+        +materialized: incremental
+        +schema: CORE
+        +tags: [facts, canonical]
+        +unique_key: ['cafc_player_id', 'cafc_fixture_id', 'cafc_kpi_id']
+        +on_schema_change: append_new_columns
+        +incremental_strategy: merge
+
+    app_compat:
+      +materialized: view
+      +schema: APP_COMPAT
+      +tags: [app_compat]
+
+# ---------------------------------------------------------------------------
+# Seeds — small reference CSVs committed to the repo.
+# ---------------------------------------------------------------------------
+seeds:
+  cafc_data_platform:
+    +schema: CORE
+    +tags: [seed, canonical]
+
+# ---------------------------------------------------------------------------
+# Data tests — apply consistent settings to both schema and singular tests.
+# Block was named `tests:` pre-1.8 and `data_tests:` from 1.8 onward.
+# ---------------------------------------------------------------------------
+data_tests:
+  +severity: error
+  +store_failures: true   # failed-test rows materialized to <schema>_dbt_test__audit
