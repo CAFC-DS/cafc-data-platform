@@ -22,5 +22,7 @@ dev = [
   "ruff>=0.5",
 ]
 
-[tool.setuptools]
-py-modules = []
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["python*"]
+exclude = ["python.extract.impect*"]   # vendored flat-modules; not a package
