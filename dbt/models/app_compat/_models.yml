@@ -1,0 +1,33 @@
+version: 2
+
+# ============================================================================
+# APP_COMPAT views — legacy-shape contract for the recruitment-platform app.
+#
+# Materialized as views (per dbt_project.yml) — always current, zero storage.
+# Live in schema CAFC_DB.APP_COMPAT (prod) or CAFC_DB.APP_COMPAT_DEV_<user>
+# (dev) via the generate_schema_name macro.
+#
+# These are the first two of ~20 legacy tables that need APP_COMPAT mirrors;
+# see _README.md for the full list and prioritisation per plan Part 3.
+# ============================================================================
+
+models:
+
+  - name: players
+    description: "Legacy-shape player view. Mirrors RECRUITMENT_TEST.PUBLIC.PLAYERS column-for-column, sourced from CORE.* via stg_impect__players + canonical bridges."
+    columns:
+      - name: PLAYERID
+        description: "Legacy external player ID (IMPECT player ID today). Same as RECRUITMENT_TEST.PUBLIC.PLAYERS.PLAYERID."
+      - name: CAFC_PLAYER_ID
+        description: "Canonical surrogate, resolved through overrides + identities."
+      - name: DATA_SOURCE
+        description: "Constant 'IMPECT' on every row of this view today. UNION ALL extends to other sources later."
+
+  - name: matches
+    description: "Legacy-shape match view. Mirrors RECRUITMENT_TEST.PUBLIC.MATCHES column-for-column. CAFC_MATCH_ID resolves through FIXTURE_IDENTITIES."
+    columns:
+      - name: ID
+        description: "Legacy IMPECT match ID."
+      - name: CAFC_MATCH_ID
+        description: "Canonical surrogate (CAFC_FIXTURE_ID)."
+      - name: DATA_SOURCE
