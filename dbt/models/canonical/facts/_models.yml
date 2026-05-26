@@ -1,0 +1,57 @@
+version: 2
+
+# ============================================================================
+# Canonical fact tables — KPIs at the player×fixture and player×season grain.
+# ============================================================================
+
+models:
+
+  - name: core_player_fixture_kpis
+    description: "Per-(player, fixture, KPI) canonical values, resolved through PLAYER_IDENTITY_OVERRIDES + PLAYER_IDENTITIES. Incremental MERGE; reprocesses the trailing 7-day window of scheduled_at to catch IMPECT recalcs."
+    columns:
+      - name: cafc_player_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: source('core', 'PLAYERS')
+                field: CAFC_PLAYER_ID
+      - name: cafc_fixture_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: source('core', 'FIXTURES')
+                field: CAFC_FIXTURE_ID
+      - name: cafc_kpi_id
+        tests: [not_null]
+      - name: kpi_value
+      - name: scheduled_at
+        tests: [not_null]
+    # Composite-uniqueness is enforced via the incremental_strategy=merge
+    # config in dbt_project.yml (unique_key = cafc_player_id × cafc_fixture_id
+    # × cafc_kpi_id) and verified post-build by
+    # tests/singular/core_player_fixture_kpis_unique.sql.
+
+  - name: core_player_season_kpis
+    description: "Per-(player, season, KPI) aggregates rolled up from core_player_fixture_kpis."
+    columns:
+      - name: cafc_player_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: source('core', 'PLAYERS')
+                field: CAFC_PLAYER_ID
+      - name: cafc_season_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('core_seasons')
+                field: cafc_season_id
+      - name: cafc_kpi_id
+        tests: [not_null]
+      - name: matches_played
+    # Composite-uniqueness verified by
+    # tests/singular/core_player_season_kpis_unique.sql.

@@ -1,0 +1,64 @@
+version: 2
+
+# ============================================================================
+# CORE operational tables exposed as dbt sources.
+#
+# These tables are NOT dbt-managed — they're operational state written by
+# the identity matcher and the orchestrator. Declaring them as sources lets
+# canonical models reference {{ source('core', 'PLAYER_IDENTITIES') }} and
+# get tracked dependencies + tests, without dbt thinking it owns them.
+#
+# Apply snowflake/ddl/20260525_identity_overrides.sql before the first
+# dbt build that depends on PLAYER_IDENTITY_OVERRIDES /
+# PLAYER_IDENTITY_CANDIDATES.
+# ============================================================================
+
+sources:
+  - name: core
+    description: "Operational tables in CAFC_DB.CORE. Written by the matcher / orchestrator, not by dbt."
+    database: CAFC_DB
+    schema: CORE
+
+    tables:
+
+      - name: PLAYERS
+        description: "Canonical players. CAFC_PLAYER_ID is the surrogate; the matcher mints new ones via CORE.CAFC_PLAYER_ID_SEQ."
+        columns:
+          - name: CAFC_PLAYER_ID
+            tests: [unique, not_null]
+
+      - name: PLAYER_IDENTITIES
+        description: "Maps (SOURCE_SYSTEM, SOURCE_PLAYER_ID) → CAFC_PLAYER_ID. Written by python/identity/matcher.py."
+        columns:
+          - name: PLAYER_IDENTITY_ID
+            tests: [unique, not_null]
+          - name: CAFC_PLAYER_ID
+            tests: [not_null]
+          - name: SOURCE_SYSTEM
+            tests: [not_null]
+          - name: SOURCE_PLAYER_ID
+            tests: [not_null]
+
+      - name: PLAYER_IDENTITY_OVERRIDES
+        description: "Manual overrides. Highest precedence in resolution; created by snowflake/ddl/20260525_identity_overrides.sql."
+
+      - name: PLAYER_IDENTITY_CANDIDATES
+        description: "Ambiguous-match queue. One row per (external, candidate) pair when matcher couldn't disambiguate."
+
+      - name: FIXTURES
+        description: "Canonical fixtures. CAFC_FIXTURE_ID is the surrogate."
+        columns:
+          - name: CAFC_FIXTURE_ID
+            tests: [unique, not_null]
+
+      - name: FIXTURE_IDENTITIES
+        description: "Maps (SOURCE_SYSTEM, SOURCE_FIXTURE_ID) → CAFC_FIXTURE_ID. No override table for fixtures yet."
+        columns:
+          - name: FIXTURE_IDENTITY_ID
+            tests: [unique, not_null]
+          - name: CAFC_FIXTURE_ID
+            tests: [not_null]
+          - name: SOURCE_SYSTEM
+            tests: [not_null]
+          - name: SOURCE_FIXTURE_ID
+            tests: [not_null]
