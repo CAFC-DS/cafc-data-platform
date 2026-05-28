@@ -34,7 +34,7 @@ models:
     # tests/singular/core_player_fixture_kpis_unique.sql.
 
   - name: core_player_season_kpis
-    description: "Per-(player, season, KPI) aggregates rolled up from core_player_fixture_kpis."
+    description: "Per-(player, season, KPI) aggregates rolled up from core_player_fixture_kpis. Championship-only today (driven by match-level data). Compare to core_player_iteration_kpis (IMPECT-aggregated, all leagues)."
     columns:
       - name: cafc_player_id
         tests:
@@ -55,3 +55,110 @@ models:
       - name: matches_played
     # Composite-uniqueness verified by
     # tests/singular/core_player_season_kpis_unique.sql.
+
+  # ============================================================================
+  # IMPECT iteration-level (season aggregate) facts.
+  # These use IMPECT's pre-computed season averages and standardized scores
+  # rather than aggregating match-level data ourselves. The "scores" tables
+  # are particularly valuable: standardized against IMPECT's cross-league
+  # comparison population, so they let you compare a player in Eredivisie 2
+  # to a player in League One on the same scale. Not recomputable from
+  # match-level data alone.
+  # ============================================================================
+
+  - name: core_squad_iteration_kpis
+    description: "Per-(squad, season, kpi) IMPECT season averages across all 708 iterations. Squad-level companion to core_player_iteration_kpis."
+    columns:
+      - name: cafc_squad_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('core_squads')
+                field: cafc_squad_id
+      - name: cafc_season_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('core_seasons')
+                field: cafc_season_id
+      - name: cafc_kpi_id
+        tests: [not_null]
+
+  - name: core_squad_iteration_scores
+    description: "Per-(squad, season, squadScoreId) IMPECT standardized squad scores. Not recomputable from match-level data — IMPECT normalizes against cross-league population."
+    columns:
+      - name: cafc_squad_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('core_squads')
+                field: cafc_squad_id
+      - name: cafc_season_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('core_seasons')
+                field: cafc_season_id
+      - name: impect_squad_score_id
+        tests: [not_null]
+
+  - name: core_player_iteration_kpis
+    description: "Per-(player, season, squad, kpi) IMPECT season averages across all 708 iterations. The primary cross-league recruitment building block. Grain includes cafc_squad_id because a player can play for multiple squads in one season (mid-season transfers)."
+    columns:
+      - name: cafc_player_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: source('core', 'PLAYERS')
+                field: CAFC_PLAYER_ID
+      - name: cafc_season_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('core_seasons')
+                field: cafc_season_id
+      - name: cafc_squad_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('core_squads')
+                field: cafc_squad_id
+      - name: cafc_kpi_id
+        tests: [not_null]
+      - name: position_code
+        description: "IMPECT position code from the season (e.g. CENTRAL_DEFENDER, GOALKEEPER)."
+
+  - name: core_player_iteration_scores
+    description: "Per-(player, season, squad, playerScoreId) IMPECT standardized player scores. Most useful table for cross-league recruitment comparison — same player across multiple seasons, multiple players across one league on a standardized scale."
+    columns:
+      - name: cafc_player_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: source('core', 'PLAYERS')
+                field: CAFC_PLAYER_ID
+      - name: cafc_season_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('core_seasons')
+                field: cafc_season_id
+      - name: cafc_squad_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('core_squads')
+                field: cafc_squad_id
+      - name: impect_player_score_id
+        tests: [not_null]
+      - name: position_code
