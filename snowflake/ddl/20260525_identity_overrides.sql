@@ -166,6 +166,11 @@ COMMENT = 'Squad-name overrides migrated from MIGRATION.SQUAD_NAME_CORRECTIONS. 
 -- should arguably be cleaned up too, but the matcher precedence (override
 -- always wins) means runtime behaviour is already correct after this insert.
 -- Cleanup of the stale PLAYER_IDENTITIES row is a separate decision.
+--
+-- The PLAYER_IDENTITIES join goes through a deduped sub-select. PLAYER_IDENTITIES
+-- can hold multiple rows per (SOURCE_SYSTEM, SOURCE_PLAYER_ID) — one per
+-- squad context — but they all share the same CAFC_PLAYER_ID, so ANY_VALUE
+-- collapses the fan-out safely.
 INSERT INTO CAFC_DB.CORE.PLAYER_IDENTITY_OVERRIDES
   (SOURCE_SYSTEM, SOURCE_PLAYER_ID, CAFC_PLAYER_ID, REASON, CREATED_BY, CREATED_AT)
 SELECT
@@ -179,9 +184,15 @@ SELECT
   CURRENT_USER()                                                          AS CREATED_BY,
   CURRENT_TIMESTAMP()                                                     AS CREATED_AT
 FROM CAFC_DB.MIGRATION.SCOUT_REPORT_PLAYER_ID_OVERRIDES src
-JOIN CAFC_DB.CORE.PLAYER_IDENTITIES pi
-  ON pi.SOURCE_SYSTEM    = 'IMPECT'
- AND pi.SOURCE_PLAYER_ID = src.CORRECT_IMPECT_PLAYER_ID
+JOIN (
+    SELECT
+        SOURCE_PLAYER_ID,
+        ANY_VALUE(CAFC_PLAYER_ID)  AS CAFC_PLAYER_ID
+    FROM CAFC_DB.CORE.PLAYER_IDENTITIES
+    WHERE SOURCE_SYSTEM = 'IMPECT'
+    GROUP BY SOURCE_PLAYER_ID
+) pi
+  ON pi.SOURCE_PLAYER_ID = src.CORRECT_IMPECT_PLAYER_ID
 WHERE NOT EXISTS (
   SELECT 1 FROM CAFC_DB.CORE.PLAYER_IDENTITY_OVERRIDES o
    WHERE o.SOURCE_SYSTEM    = 'IMPECT'
