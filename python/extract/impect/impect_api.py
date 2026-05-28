@@ -326,3 +326,130 @@ def get_countries(params: Optional[Dict] = None) -> Dict[str, Any]:
         Countries data
     """
     return make_request("/v5/customerapi/countries", params)
+
+
+# =============================================================================
+#  Iteration-level (season aggregate) endpoints.
+#  Added in plan §2.6+ alongside the cross-iteration extract work. These give
+#  per-season averages, standardized scores, and positional profile scores —
+#  the data that match-level KPIs aggregate up to.
+# =============================================================================
+
+def get_iteration_squad_kpis(iteration_id: int, params: Optional[Dict] = None) -> Dict[str, Any]:
+    """
+    Get squad-level KPI averages for a single iteration.
+
+    Args:
+        iteration_id: Iteration ID
+        params: Optional query parameters
+
+    Returns:
+        One row per (squad, kpi) for the iteration. Source-of-truth for
+        IMPECT_RAW.ITERATION_SQUAD_KPIS.
+    """
+    return make_request(f"/v5/customerapi/iterations/{iteration_id}/squad-kpis", params)
+
+
+def get_iteration_squad_scores(iteration_id: int, params: Optional[Dict] = None) -> Dict[str, Any]:
+    """
+    Get squad-level standardized scores for a single iteration.
+
+    Args:
+        iteration_id: Iteration ID
+        params: Optional query parameters
+
+    Returns:
+        One row per (squad, kpi) with z-scores / percentiles relative to
+        IMPECT's cross-league comparison population. Not recomputable from
+        match-level data alone. Source-of-truth for IMPECT_RAW.ITERATION_SQUAD_SCORES.
+    """
+    return make_request(f"/v5/customerapi/iterations/{iteration_id}/squad-scores", params)
+
+
+def get_iteration_player_kpis(iteration_id: int, squad_id: int,
+                              params: Optional[Dict] = None) -> Dict[str, Any]:
+    """
+    Get player-level KPI averages for a single (iteration, squad).
+
+    Args:
+        iteration_id: Iteration ID
+        squad_id: Squad ID (scoped to a single squad's players in this iteration)
+        params: Optional query parameters
+
+    Returns:
+        One row per (player, kpi). Source-of-truth for IMPECT_RAW.ITERATION_PLAYER_KPIS.
+    """
+    return make_request(
+        f"/v5/customerapi/iterations/{iteration_id}/squads/{squad_id}/player-kpis",
+        params,
+    )
+
+
+def get_iteration_player_scores(iteration_id: int, squad_id: int,
+                                params: Optional[Dict] = None) -> Dict[str, Any]:
+    """
+    Get player-level standardized scores for a single (iteration, squad).
+
+    Args:
+        iteration_id: Iteration ID
+        squad_id: Squad ID
+        params: Optional query parameters
+
+    Returns:
+        One row per (player, kpi) with standardized scores. Source-of-truth for
+        IMPECT_RAW.ITERATION_PLAYER_SCORES.
+    """
+    return make_request(
+        f"/v5/customerapi/iterations/{iteration_id}/squads/{squad_id}/player-scores",
+        params,
+    )
+
+
+def get_iteration_player_profile_scores(iteration_id: int, squad_id: int,
+                                        positions: str,
+                                        params: Optional[Dict] = None) -> Dict[str, Any]:
+    """
+    Get player profile scores filtered to position(s) for a (iteration, squad).
+
+    Args:
+        iteration_id: Iteration ID
+        squad_id: Squad ID
+        positions: IMPECT position code(s). Single code (e.g. "CB") or
+                   comma-separated list. Exact codes are TBD — call with a known
+                   code to validate before scripting bulk extraction.
+        params: Optional query parameters
+
+    Returns:
+        One row per (player, profile_score). These are IMPECT's positional
+        fitness scores — how well a player's stat distribution matches the
+        typical "excellent" profile for those positions. Source-of-truth for
+        IMPECT_RAW.ITERATION_PLAYER_PROFILE_SCORES.
+    """
+    return make_request(
+        f"/v5/customerapi/iterations/{iteration_id}/squads/{squad_id}"
+        f"/positions/{positions}/player-profile-scores",
+        params,
+    )
+
+
+def get_iteration_player_scores_by_position(iteration_id: int, squad_id: int,
+                                            positions: str,
+                                            params: Optional[Dict] = None) -> Dict[str, Any]:
+    """
+    Get player standardized scores filtered to position(s) for a (iteration, squad).
+
+    Args:
+        iteration_id: Iteration ID
+        squad_id: Squad ID
+        positions: IMPECT position code(s). See get_iteration_player_profile_scores.
+        params: Optional query parameters
+
+    Returns:
+        One row per (player, kpi) with scores standardized within the position
+        comparison population. Source-of-truth for IMPECT_RAW.ITERATION_PLAYER_POSITION_SCORES.
+    """
+    return make_request(
+        f"/v5/customerapi/iterations/{iteration_id}/squads/{squad_id}"
+        f"/positions/{positions}/player-scores",
+        params,
+    )
