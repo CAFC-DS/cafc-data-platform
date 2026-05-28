@@ -5,45 +5,74 @@ and load into Snowflake.
 Endpoint: GET /v5/customerapi/iterations/{iterationId}/squad-kpis
 Table:    CAFC_DB.IMPECT_RAW.ITERATION_SQUAD_KPIS
 
-One API call per iteration (~708 calls total). Serial execution is fine
-at this scale (~5-10 minutes).
+Output shape: one row per (iteration, squad, kpi). Mirrors the existing
+flat CHAMPIONSHIP_PLAYER_KPIS pattern.
+
+Columns landed: ITERATION_ID, SQUAD_ID, MATCHES, KPI_ID, VALUE.
 
 Usage:
-    python load_iteration_squad_kpis.py                    # all iterations
-    python load_iteration_squad_kpis.py --limit-iterations 5  # smoke test
+    python load_iteration_squad_kpis.py                       # all iterations
+    python load_iteration_squad_kpis.py --iteration-id 1410   # single (testing)
+    python load_iteration_squad_kpis.py --limit-iterations 5  # first 5
 """
 import argparse
 
 import pandas as pd
 
 from impect_api import get_iterations, get_iteration_squad_kpis
-from snowflake_loader import flatten_id_mappings, json_to_dataframe, load_to_snowflake
+from snowflake_loader import load_to_snowflake
 
 TABLE_NAME = "ITERATION_SQUAD_KPIS"
 
 
-def run(limit_iterations=None):
-    print("Fetching iterations…")
-    iterations_response = get_iterations()
-    iteration_ids = [row["id"] for row in iterations_response.get("data", [])]
-    if limit_iterations:
-        iteration_ids = iteration_ids[:limit_iterations]
-    print(f"Fetching squad KPIs for {len(iteration_ids)} iterations")
+def _flatten(records, iteration_id):
+    """Explode the nested `kpis` array into one row per (squad, kpi)."""
+    if not records:
+        return pd.DataFrame()
+    df = pd.json_normalize(
+        records,
+        record_path="kpis",
+        meta=["squadId", "matches"],
+    )
+    df["iteration_id"] = iteration_id
+    df = df.rename(columns={
+        "kpiId":   "kpi_id",
+        "value":   "value",
+        "squadId": "squad_id",
+    })
+    return df[["iteration_id", "squad_id", "matches", "kpi_id", "value"]]
+
+
+def run(iteration_id=None, limit_iterations=None):
+    if iteration_id is not None:
+        iteration_ids = [iteration_id]
+        print(f"Targeted run: iteration_id={iteration_id}")
+    else:
+        print("Fetching iterations…")
+        iterations_response = get_iterations()
+        iteration_ids = [row["id"] for row in iterations_response.get("data", [])]
+        if limit_iterations:
+            iteration_ids = iteration_ids[:limit_iterations]
+        print(f"Fetching squad KPIs for {len(iteration_ids)} iterations")
 
     all_frames = []
     errors = []
+    empty_iterations = 0
 
-    for i, iteration_id in enumerate(iteration_ids, start=1):
+    for i, iter_id in enumerate(iteration_ids, start=1):
         try:
-            response = get_iteration_squad_kpis(iteration_id)
-            df = json_to_dataframe(response)
+            response = get_iteration_squad_kpis(iter_id)
+            data = response.get("data", [])
+            if not data:
+                empty_iterations += 1
+                continue
+            df = _flatten(data, iter_id)
             if not df.empty:
-                df["ITERATION_ID"] = iteration_id
                 all_frames.append(df)
         except Exception as exc:  # noqa: BLE001
-            errors.append((iteration_id, str(exc)))
+            errors.append((iter_id, str(exc)))
         if i % 50 == 0 or i == len(iteration_ids):
-            print(f"  progress: {i}/{len(iteration_ids)}  (errors so far: {len(errors)})")
+            print(f"  progress: {i}/{len(iteration_ids)}  empty: {empty_iterations}  errors: {len(errors)}")
 
     if errors:
         print(f"\n{len(errors)} iteration(s) failed:")
@@ -57,20 +86,23 @@ def run(limit_iterations=None):
         return
 
     combined_df = pd.concat(all_frames, ignore_index=True)
-    combined_df = flatten_id_mappings(combined_df)
-    print(f"Total rows to load: {len(combined_df)}")
+    print(f"Total rows to load: {len(combined_df)}  (from {len(all_frames)} non-empty iterations)")
     load_to_snowflake(combined_df, TABLE_NAME, overwrite=True)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument(
+        "--iteration-id", type=int, default=None,
+        help="Run for a specific iteration only (smoke-testing). Overrides --limit-iterations.",
+    )
+    parser.add_argument(
         "--limit-iterations", type=int, default=None,
-        help="Cap the number of iterations processed. Useful for smoke-tests.",
+        help="Cap the number of iterations processed.",
     )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run(limit_iterations=args.limit_iterations)
+    run(iteration_id=args.iteration_id, limit_iterations=args.limit_iterations)

@@ -5,12 +5,13 @@ Impect API and load into Snowflake.
 Endpoint: GET /v5/customerapi/iterations/{iterationId}/squads/{squadId}/player-scores
 Table:    CAFC_DB.IMPECT_RAW.ITERATION_PLAYER_SCORES
 
-Identical extract shape to load_iteration_player_kpis.py — one API call
-per (iteration, squad). The two scripts could share code, but kept
-separate so each one's table can be re-pulled independently when needed.
+Output shape: one row per (iteration, squad, player, playerScore).
+Columns landed: ITERATION_ID, SQUAD_ID, PLAYER_ID, POSITION, PLAY_DURATION,
+                MATCH_SHARE, PLAYER_SCORE_ID, VALUE.
 
 Usage:
     python load_iteration_player_scores.py
+    python load_iteration_player_scores.py --iteration-id 1410
     python load_iteration_player_scores.py --limit-iterations 3
 """
 import argparse
@@ -19,21 +20,41 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 
 from impect_api import get_iteration_player_scores, get_iterations, get_squads
-from snowflake_loader import flatten_id_mappings, json_to_dataframe, load_to_snowflake
+from snowflake_loader import load_to_snowflake
 
 TABLE_NAME = "ITERATION_PLAYER_SCORES"
 DEFAULT_MAX_WORKERS = 8
 
 
-def _fetch_pair(iteration_id: int, squad_id: int):
+def _flatten(records, iteration_id, squad_id):
+    """Explode nested `playerScores` array into one row per (player, score)."""
+    if not records:
+        return pd.DataFrame()
+    df = pd.json_normalize(
+        records,
+        record_path="playerScores",
+        meta=["playerId", "position", "playDuration", "matchShare"],
+    )
+    df["iteration_id"] = iteration_id
+    df["squad_id"] = squad_id
+    df = df.rename(columns={
+        "playerScoreId": "player_score_id",
+        "value":         "value",
+        "playerId":      "player_id",
+        "position":      "position",
+        "playDuration":  "play_duration",
+        "matchShare":    "match_share",
+    })
+    return df[["iteration_id", "squad_id", "player_id", "position",
+               "play_duration", "match_share", "player_score_id", "value"]]
+
+
+def _fetch_pair(iteration_id, squad_id):
     try:
         response = get_iteration_player_scores(iteration_id, squad_id)
-        df = json_to_dataframe(response)
-        if df.empty:
-            return None
-        df["ITERATION_ID"] = iteration_id
-        df["SQUAD_ID"] = squad_id
-        return df
+        data = response.get("data", [])
+        df = _flatten(data, iteration_id, squad_id)
+        return df if not df.empty else None
     except Exception as exc:  # noqa: BLE001
         return ("error", iteration_id, squad_id, str(exc))
 
@@ -53,13 +74,17 @@ def _discover_pairs(iteration_ids):
     return pairs
 
 
-def run(limit_iterations=None, max_workers=DEFAULT_MAX_WORKERS):
-    print("Fetching iterations…")
-    iterations_response = get_iterations()
-    iteration_ids = [row["id"] for row in iterations_response.get("data", [])]
-    if limit_iterations:
-        iteration_ids = iteration_ids[:limit_iterations]
-    print(f"Discovered {len(iteration_ids)} iterations")
+def run(iteration_id=None, limit_iterations=None, max_workers=DEFAULT_MAX_WORKERS):
+    if iteration_id is not None:
+        iteration_ids = [iteration_id]
+        print(f"Targeted run: iteration_id={iteration_id}")
+    else:
+        print("Fetching iterations…")
+        iterations_response = get_iterations()
+        iteration_ids = [row["id"] for row in iterations_response.get("data", [])]
+        if limit_iterations:
+            iteration_ids = iteration_ids[:limit_iterations]
+        print(f"Discovered {len(iteration_ids)} iterations")
 
     print("Discovering (iteration, squad) pairs…")
     pairs = _discover_pairs(iteration_ids)
@@ -93,24 +118,23 @@ def run(limit_iterations=None, max_workers=DEFAULT_MAX_WORKERS):
         return
 
     combined_df = pd.concat(all_frames, ignore_index=True)
-    combined_df = flatten_id_mappings(combined_df)
-    print(f"Total rows to load: {len(combined_df)}")
+    print(f"Total rows to load: {len(combined_df)}  (from {len(all_frames)} non-empty pairs)")
     load_to_snowflake(combined_df, TABLE_NAME, overwrite=True)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument(
-        "--limit-iterations", type=int, default=None,
-        help="Cap the number of iterations processed. Useful for smoke-tests.",
-    )
-    parser.add_argument(
-        "--max-workers", type=int, default=DEFAULT_MAX_WORKERS,
-        help=f"Parallelism for the fetch phase. Default: {DEFAULT_MAX_WORKERS}.",
-    )
+    parser.add_argument("--iteration-id", type=int, default=None,
+                        help="Run for a specific iteration only.")
+    parser.add_argument("--limit-iterations", type=int, default=None,
+                        help="Cap the number of iterations processed.")
+    parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS,
+                        help=f"Parallelism. Default: {DEFAULT_MAX_WORKERS}.")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run(limit_iterations=args.limit_iterations, max_workers=args.max_workers)
+    run(iteration_id=args.iteration_id,
+        limit_iterations=args.limit_iterations,
+        max_workers=args.max_workers)
