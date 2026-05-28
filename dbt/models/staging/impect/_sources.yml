@@ -168,3 +168,108 @@ sources:
                     field: ID
           - name: KPIID
           - name: VALUE
+
+      # ----------------------------------------------------------------------
+      # Iteration-level (season aggregate) tables.
+      # Populated by python/extract/impect/load_iteration_*.py across every
+      # iteration in IMPECT_RAW.ITERATIONS. Already flat (one row per
+      # (iteration, squad/player, kpi/score)) — no normalisation needed in
+      # staging.
+      # ----------------------------------------------------------------------
+
+      - name: ITERATION_SQUAD_KPIS
+        description: "Per-(iteration, squad, kpi) season-average KPI values across all iterations IMPECT exposes."
+        columns:
+          - name: ITERATION_ID
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('impect', 'ITERATIONS')
+                    field: ID
+          - name: SQUAD_ID
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('impect', 'SQUADS')
+                    field: ID
+          - name: KPI_ID
+          - name: MATCHES
+            description: "Number of matches the squad played in this iteration; denominator for any subsequent per-90 calculations."
+          - name: VALUE
+
+      - name: ITERATION_SQUAD_SCORES
+        description: "Per-(iteration, squad, score) standardized squad scores from IMPECT. Not recomputable from match-level data — they're normalized against IMPECT's cross-league comparison population."
+        columns:
+          - name: ITERATION_ID
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('impect', 'ITERATIONS')
+                    field: ID
+          - name: SQUAD_ID
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('impect', 'SQUADS')
+                    field: ID
+          - name: SQUAD_SCORE_ID
+          - name: MATCHES
+          - name: VALUE
+            description: "Normalized score (typically 0-1 percentile-style)."
+
+      - name: ITERATION_PLAYER_KPIS
+        description: "Per-(iteration, squad, player, kpi) season-average player KPIs. The primary input to canonical season-grain player models. ~107 rows per (iteration, squad) on average."
+        columns:
+          - name: ITERATION_ID
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('impect', 'ITERATIONS')
+                    field: ID
+          - name: SQUAD_ID
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('impect', 'SQUADS')
+                    field: ID
+          - name: PLAYER_ID
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('impect', 'PLAYERS')
+                    field: ID
+          - name: KPI_ID
+          - name: POSITION
+            description: "IMPECT position code, e.g. CENTRAL_DEFENDER, GOALKEEPER, LEFT_WINGBACK_DEFENDER. Used by the position-specific endpoints when they're wired up."
+          - name: PLAY_DURATION
+            description: "Total playing seconds the player accumulated in this (iteration, squad)."
+          - name: MATCH_SHARE
+            description: "Fraction of available match-time the player was on (proxy for 'minutes played as % of season')."
+          - name: VALUE
+
+      - name: ITERATION_PLAYER_SCORES
+        description: "Per-(iteration, squad, player, playerScore) standardized player scores. Same un-recomputable property as ITERATION_SQUAD_SCORES — IMPECT's normalization population is the value-add."
+        columns:
+          - name: ITERATION_ID
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('impect', 'ITERATIONS')
+                    field: ID
+          - name: SQUAD_ID
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('impect', 'SQUADS')
+                    field: ID
+          - name: PLAYER_ID
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('impect', 'PLAYERS')
+                    field: ID
+          - name: PLAYER_SCORE_ID
+          - name: POSITION
+          - name: PLAY_DURATION
+          - name: MATCH_SHARE
+          - name: VALUE
