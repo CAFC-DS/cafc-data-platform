@@ -135,45 +135,88 @@ def get_http_session() -> requests.Session:
     return session
 
 
-def make_request(endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
+def force_token_refresh() -> None:
+    """Clear the cached token so the next get_auth_token() forces a fresh login."""
+    try:
+        os.remove(config.TOKEN_CACHE_FILE)
+    except FileNotFoundError:
+        pass
+
+
+# Cap on total attempts per request. Generous because long-running extracts
+# can encounter sustained rate-limiting and we'd rather wait than fail a call.
+DEFAULT_MAX_ATTEMPTS = 10
+# 429 backoff schedule: doubles each attempt, capped at 60s.
+MAX_429_SLEEP_SECONDS = 60
+
+
+def make_request(endpoint: str, params: Optional[Dict] = None,
+                 max_attempts: int = DEFAULT_MAX_ATTEMPTS) -> Dict[str, Any]:
     """
-    Make a GET request to the Impect API
+    Make a GET request to the Impect API with token-refresh and exponential
+    backoff. Raises on full exhaustion (does not silently return {} like the
+    old version, which caused player-level loaders to silently lose data).
+
+    Three failure modes handled:
+        - 401: token expired. Clear cache, retry once with fresh token.
+        - 429: rate limited. Exponential backoff (1, 2, 4, 8, 16, 32, 60s cap).
+        - Network errors: exponential backoff with cap of 30s.
 
     Args:
         endpoint: API endpoint path (e.g., '/v5/customerapi/iterations')
         params: Optional query parameters
+        max_attempts: Maximum retry budget (default 10)
 
     Returns:
         JSON response as dictionary
     """
     url = f"{config.IMPECT_BASE_URL}{endpoint}"
-    headers = get_auth_headers()
     session = get_http_session()
 
-    for attempt in range(config.MAX_RETRIES):
+    rate_limit_backoff = 1.0
+    refreshed_token_this_call = False
+
+    for attempt in range(max_attempts):
+        # Fetch headers INSIDE the loop so token refresh between retries
+        # actually takes effect.
+        headers = get_auth_headers()
         try:
             response = session.get(
                 url,
                 headers=headers,
                 params=params,
-                timeout=config.REQUEST_TIMEOUT
+                timeout=config.REQUEST_TIMEOUT,
             )
 
-            # Handle rate limiting (429 Too Many Requests)
+            # Handle rate limiting (429 Too Many Requests) with exponential backoff.
             if response.status_code == 429:
-                print("Rate limit hit (429), waiting 1 second...")
-                time.sleep(1)
+                sleep_s = min(rate_limit_backoff, MAX_429_SLEEP_SECONDS)
+                # Quieter logging: only print every 3rd 429 to avoid drowning the log.
+                if attempt % 3 == 0:
+                    print(f"  rate limit (429) on {endpoint}, waiting {sleep_s:.0f}s (attempt {attempt + 1}/{max_attempts})")
+                time.sleep(sleep_s)
+                rate_limit_backoff *= 2
+                continue
+
+            # Handle expired token (401) with one-shot refresh.
+            if response.status_code == 401 and not refreshed_token_this_call:
+                print(f"  auth expired on {endpoint}, refreshing token")
+                force_token_refresh()
+                refreshed_token_this_call = True
                 continue
 
             response.raise_for_status()
             return response.json()
 
         except requests.exceptions.RequestException as e:
-            if attempt == config.MAX_RETRIES - 1:
+            if attempt == max_attempts - 1:
                 raise Exception(f"Failed to fetch data from {endpoint}: {str(e)}")
-            time.sleep(2 ** attempt)  # Exponential backoff
+            time.sleep(min(2 ** attempt, 30))
 
-    return {}
+    raise Exception(
+        f"Exhausted {max_attempts} attempts for {endpoint} "
+        f"(likely sustained rate limiting; consider lowering concurrency)"
+    )
 
 
 def get_iterations(params: Optional[Dict] = None) -> Dict[str, Any]:
