@@ -19,10 +19,29 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 
 from impect_api import get_iteration_player_scores, get_iterations, get_squads
-from snowflake_loader import load_to_snowflake
+from snowflake_loader import get_connection, load_to_snowflake
 
 TABLE_NAME = "ITERATION_PLAYER_SCORES"
 DEFAULT_MAX_WORKERS = 2
+
+
+def _fetch_loaded_iteration_ids():
+    """Return the set of ITERATION_ID values already in CAFC_DB.IMPECT_RAW.<TABLE_NAME>.
+    Returns an empty set if the table doesn't exist or is empty."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                f"SELECT DISTINCT ITERATION_ID FROM CAFC_DB.IMPECT_RAW.{TABLE_NAME}"
+            )
+            return {row[0] for row in cur.fetchall()}
+        except Exception:  # noqa: BLE001
+            return set()
+        finally:
+            cur.close()
+    finally:
+        conn.close()
 
 
 def _flatten(records, iteration_id, squad_id):
@@ -96,7 +115,7 @@ def _process_one_iteration(iteration, max_workers):
 
 
 def run(iteration_id=None, seasons=None, limit_iterations=None,
-        max_workers=DEFAULT_MAX_WORKERS):
+        max_workers=DEFAULT_MAX_WORKERS, skip_loaded=False):
     print("Fetching iterations…")
     iterations_response = get_iterations()
     iterations = iterations_response.get("data", [])
@@ -113,13 +132,24 @@ def run(iteration_id=None, seasons=None, limit_iterations=None,
         iterations = iterations[:limit_iterations]
         print(f"Limited to first {limit_iterations}: {len(iterations)} iterations")
 
+    resuming = False
+    if skip_loaded:
+        already_loaded = _fetch_loaded_iteration_ids()
+        before = len(iterations)
+        iterations = [it for it in iterations if it["id"] not in already_loaded]
+        skipped = before - len(iterations)
+        print(f"--skip-loaded: {len(already_loaded)} iterations already in {TABLE_NAME}; "
+              f"skipping {skipped}, {len(iterations)} remaining")
+        if skipped > 0:
+            resuming = True
+
     if not iterations:
         print("No iterations to process")
         return
 
     total_rows = 0
     total_errors = 0
-    first_write = True
+    first_write = not resuming
 
     for i, iteration in enumerate(iterations, start=1):
         iter_id = iteration["id"]
@@ -151,6 +181,9 @@ def parse_args():
                         help='Comma-separated season strings, e.g. "25/26,24/25,23/24".')
     parser.add_argument("--limit-iterations", type=int, default=None)
     parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS)
+    parser.add_argument("--skip-loaded", action="store_true",
+                        help="Resume mode: skip iterations whose ITERATION_ID is already "
+                             "in the target Snowflake table.")
     return parser.parse_args()
 
 
@@ -159,4 +192,5 @@ if __name__ == "__main__":
     run(iteration_id=args.iteration_id,
         seasons=args.seasons,
         limit_iterations=args.limit_iterations,
-        max_workers=args.max_workers)
+        max_workers=args.max_workers,
+        skip_loaded=args.skip_loaded)
