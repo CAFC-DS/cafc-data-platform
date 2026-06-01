@@ -157,10 +157,20 @@ sources:
                     field: ID
           - name: PLAYERID
             tests:
+              # severity:warn — raw IMPECT_RAW.PLAYERS is deliberately scoped to
+              # the player-fact seasons (last ~3), but championship match data
+              # spans more history, so ~298k championship KPI rows reference
+              # players absent from the scoped raw dimension. This does NOT
+              # affect the canonical layer: those players resolve through
+              # CORE.PLAYER_IDENTITIES / CORE.PLAYERS (verified by no_orphan_kpis),
+              # and core_player_fixture_kpis is complete. Warn keeps the gap
+              # visible without failing the refresh.
               - relationships:
                   arguments:
                     to: source('impect', 'PLAYERS')
                     field: ID
+                  config:
+                    severity: warn
           - name: SQUADID
             tests:
               - relationships:
