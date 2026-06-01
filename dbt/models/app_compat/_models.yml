@@ -31,3 +31,24 @@ models:
       - name: CAFC_MATCH_ID
         description: "Canonical surrogate (CAFC_FIXTURE_ID)."
       - name: DATA_SOURCE
+
+  # --------------------------------------------------------------------------
+  # App-owned legacy passthroughs (formalised from hand-built views 2026-06-01).
+  # These mirror RECRUITMENT_TEST.PUBLIC.* (or CORE.USERS) verbatim — the app
+  # writes them, dbt only bridges them until Part 3 cutover (docs/decisions/0001).
+  # --------------------------------------------------------------------------
+
+  - name: scout_reports
+    description: "Scout reports, app-owned. Passthrough of the live RECRUITMENT_TEST.PUBLIC.SCOUT_REPORTS (already carries PLAYER_ID + CAFC_PLAYER_ID). Replaces the prior hand-built view that pointed at the dropped CORE.SCOUT_REPORTS_TEST."
+
+  - name: scout_report_attribute_scores
+    description: "Per-(scout report, attribute) scores. App-owned passthrough."
+
+  - name: scout_report_views
+    description: "Scout-report read-receipts. App-owned passthrough."
+
+  - name: position_attributes
+    description: "Per-position attribute catalogue. App-owned passthrough."
+
+  - name: users
+    description: "Application users, app-owned. Passthrough of CORE.USERS."

@@ -1,0 +1,30 @@
+version: 2
+
+# ============================================================================
+# Legacy recruitment-platform tables, exposed as dbt sources so the APP_COMPAT
+# passthrough views can reference them with tracked dependencies.
+#
+# These tables live in RECRUITMENT_TEST.PUBLIC and are WRITTEN BY THE APP
+# (scouts/managers using the platform) — dbt does not own or rebuild them
+# (see docs/decisions/0001). They stay here until the Part 3 per-feature
+# cutover; the APP_COMPAT views over them are the transition bridge.
+#
+# scout_reports already carries both PLAYER_ID (legacy) and CAFC_PLAYER_ID
+# (canonical) at source, so its compat view needs no extra identity join.
+# ============================================================================
+
+sources:
+  - name: recruitment_legacy
+    description: "Live app-owned tables in RECRUITMENT_TEST.PUBLIC. Written by the recruitment app, not dbt. Bridged into APP_COMPAT until Part 3 cutover."
+    database: RECRUITMENT_TEST
+    schema: PUBLIC
+
+    tables:
+      - name: POSITION_ATTRIBUTES
+        description: "Per-position attribute catalogue used by scout-report scoring."
+      - name: SCOUT_REPORTS
+        description: "Scout reports written in the app. Carries PLAYER_ID (legacy) + CAFC_PLAYER_ID (canonical). The authoritative live home; CORE.SCOUT_REPORTS_TEST that an earlier APP_COMPAT view pointed at has been dropped."
+      - name: SCOUT_REPORT_ATTRIBUTE_SCORES
+        description: "Per-(scout report, attribute) scores."
+      - name: SCOUT_REPORT_VIEWS
+        description: "Read-receipts: which user viewed which scout report when."
