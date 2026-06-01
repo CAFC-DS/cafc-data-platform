@@ -206,6 +206,7 @@ def refresh(
     source_system: str = "IMPECT",
     dry_run: bool = False,
     skip_extract: bool = False,
+    skip_app_compat: bool = False,
     target: str = "dev",
     triggered_by: Optional[str] = None,
 ) -> int:
@@ -257,12 +258,17 @@ def refresh(
             )
             log.info("matcher classification: %s", counts)
 
-            # Step 5 — build canonical + app_compat.
-            log.info("[step 5/7] dbt build canonical + app_compat")
-            step_dbt_build(
-                select="tag:dimensions tag:facts tag:app_compat",
-                target=target,
-            )
+            # Step 5 — build canonical (+ app_compat unless deferred).
+            # app_compat is skippable because promoting it to prod replaces the
+            # existing hand-built APP_COMPAT.PLAYERS/MATCHES views, which per
+            # docs/decisions/0001 are deferred until they're formalised as dbt
+            # models with dual IDs. Dev runs normally include it.
+            canonical_select = ("tag:dimensions tag:facts"
+                                 if skip_app_compat
+                                 else "tag:dimensions tag:facts tag:app_compat")
+            log.info("[step 5/7] dbt build canonical%s",
+                     "" if skip_app_compat else " + app_compat")
+            step_dbt_build(select=canonical_select, target=target)
 
             # Step 6 — tests.
             log.info("[step 6/7] dbt test")
@@ -314,6 +320,10 @@ def _build_argparser() -> argparse.ArgumentParser:
                     help="Skip extract; run matcher in dry-run (no writes); use dev target.")
     pr.add_argument("--skip-extract", action="store_true",
                     help="Skip the extract step; useful when data is already loaded.")
+    pr.add_argument("--skip-app-compat", action="store_true",
+                    help="Build only dimensions + facts in step 5, not the app_compat "
+                         "views. Use for prod until the app_compat views are formalised "
+                         "(docs/decisions/0001).")
     pr.add_argument("--target", default="dev",
                     help="dbt target name (default: dev).")
     pr.add_argument("--triggered-by", default=None,
@@ -335,6 +345,7 @@ def main() -> int:
             source_system=args.source,
             dry_run=args.dry_run,
             skip_extract=args.skip_extract,
+            skip_app_compat=args.skip_app_compat,
             target=args.target,
             triggered_by=args.triggered_by,
         )
