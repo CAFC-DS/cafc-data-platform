@@ -99,6 +99,16 @@ def _filter_iterations_by_season(iterations, seasons):
     return [it for it in iterations if it.get("season") in season_set]
 
 
+def _filter_male_iterations(iterations):
+    """Platform policy: women's competitions are excluded platform-wide
+    (decided 2026-05-31), so bulk extracts skip them by default and don't
+    waste per-squad API calls on data the dbt layer would filter out anyway.
+    Pass --include-womens (or target one explicitly with --iteration-id) to
+    keep them. The raw IMPECT_RAW.* tables already loaded stay untouched."""
+    return [it for it in iterations
+            if (it.get("competition") or {}).get("gender") == "MALE"]
+
+
 def _process_one_iteration(iteration, max_workers):
     """
     Fetch all (iteration, squad) pairs for one iteration. Returns
@@ -137,11 +147,19 @@ def _process_one_iteration(iteration, max_workers):
 
 
 def run(iteration_id=None, seasons=None, limit_iterations=None,
-        max_workers=DEFAULT_MAX_WORKERS, skip_loaded=False):
+        max_workers=DEFAULT_MAX_WORKERS, skip_loaded=False, include_womens=False):
     print("Fetching iterations…")
     iterations_response = get_iterations()
     iterations = iterations_response.get("data", [])
     print(f"  {len(iterations)} total iterations in IMPECT")
+
+    # Women's-exclusion policy applies to bulk/season runs. An explicit
+    # --iteration-id is treated as a deliberate override and is left alone.
+    if not include_womens and iteration_id is None:
+        before = len(iterations)
+        iterations = _filter_male_iterations(iterations)
+        print(f"  excluding women's competitions: {before - len(iterations)} dropped, "
+              f"{len(iterations)} male iterations remain")
 
     if iteration_id is not None:
         iterations = [it for it in iterations if it["id"] == iteration_id]
@@ -213,6 +231,9 @@ def parse_args():
                         help="Resume mode: skip iterations whose ITERATION_ID is already "
                              "in the target Snowflake table. Use after a crash to pick up "
                              "where the previous run left off.")
+    parser.add_argument("--include-womens", action="store_true",
+                        help="Override the platform-wide women's-competition exclusion and "
+                             "fetch women's iterations too. Off by default.")
     return parser.parse_args()
 
 
@@ -222,4 +243,5 @@ if __name__ == "__main__":
         seasons=args.seasons,
         limit_iterations=args.limit_iterations,
         max_workers=args.max_workers,
-        skip_loaded=args.skip_loaded)
+        skip_loaded=args.skip_loaded,
+        include_womens=args.include_womens)

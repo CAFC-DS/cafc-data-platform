@@ -34,3 +34,10 @@ renamed as (
 )
 
 select * from renamed
+-- Women's competitions excluded platform-wide (see var in dbt_project.yml).
+-- This is the master gatekeeper: core_competitions and core_seasons derive
+-- from this model, and the iteration facts inner-join core_seasons, so a
+-- single filter here cascades to every downstream canonical + app_compat model.
+{% if not var('include_womens_competitions', false) %}
+where competition_gender = 'MALE'
+{% endif %}

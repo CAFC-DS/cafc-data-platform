@@ -43,14 +43,23 @@ def _flatten(records, iteration_id):
     return df[["iteration_id", "squad_id", "matches", "kpi_id", "value"]]
 
 
-def run(iteration_id=None, limit_iterations=None):
+def run(iteration_id=None, limit_iterations=None, include_womens=False):
     if iteration_id is not None:
         iteration_ids = [iteration_id]
         print(f"Targeted run: iteration_id={iteration_id}")
     else:
         print("Fetching iterations…")
         iterations_response = get_iterations()
-        iteration_ids = [row["id"] for row in iterations_response.get("data", [])]
+        iterations = iterations_response.get("data", [])
+        # Women's competitions are excluded platform-wide (decided 2026-05-31);
+        # skip them by default so bulk extracts don't pull data dbt would filter.
+        if not include_womens:
+            before = len(iterations)
+            iterations = [it for it in iterations
+                          if (it.get("competition") or {}).get("gender") == "MALE"]
+            print(f"  excluding women's competitions: {before - len(iterations)} dropped, "
+                  f"{len(iterations)} male iterations remain")
+        iteration_ids = [row["id"] for row in iterations]
         if limit_iterations:
             iteration_ids = iteration_ids[:limit_iterations]
         print(f"Fetching squad KPIs for {len(iteration_ids)} iterations")
@@ -100,9 +109,15 @@ def parse_args():
         "--limit-iterations", type=int, default=None,
         help="Cap the number of iterations processed.",
     )
+    parser.add_argument(
+        "--include-womens", action="store_true",
+        help="Override the platform-wide women's-competition exclusion and "
+             "fetch women's iterations too. Off by default.",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run(iteration_id=args.iteration_id, limit_iterations=args.limit_iterations)
+    run(iteration_id=args.iteration_id, limit_iterations=args.limit_iterations,
+        include_womens=args.include_womens)

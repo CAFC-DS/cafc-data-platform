@@ -25,3 +25,8 @@ renamed as (
 )
 
 select * from renamed
+-- Women's squads excluded platform-wide (see var in dbt_project.yml). Keeps
+-- the canonical squad dimension free of women's clubs/national teams.
+{% if not var('include_womens_competitions', false) %}
+where gender = 'MALE'
+{% endif %}

@@ -24,6 +24,18 @@ config-version: 2
 
 profile: cafc_data_platform
 
+# ---------------------------------------------------------------------------
+# Project vars
+# ---------------------------------------------------------------------------
+vars:
+  # Women's competitions are excluded platform-wide (decided 2026-05-31).
+  # The exclusion is applied at the staging chokepoints (stg_impect__iterations,
+  # __squads, __players) and cascades to every canonical + app_compat model.
+  # Raw IMPECT_RAW.* tables stay faithful to source — this only filters the
+  # transform layer. Flip to true to bring women's data back into the platform:
+  #   dbt build --vars 'include_womens_competitions: true'
+  include_womens_competitions: false
+
 model-paths:    ["models"]
 seed-paths:     ["seeds"]
 snapshot-paths: ["snapshots"]
