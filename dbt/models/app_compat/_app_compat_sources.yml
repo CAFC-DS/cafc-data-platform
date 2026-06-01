@@ -28,3 +28,33 @@ sources:
         description: "Per-(scout report, attribute) scores."
       - name: SCOUT_REPORT_VIEWS
         description: "Read-receipts: which user viewed which scout report when."
+
+      # Player workflow tables (§1a). PLAYER_LIST_ITEMS already carries
+      # CAFC_PLAYER_ID; PLAYER_NOTES / PLAYER_STAGE_HISTORY / PLAYER_INFORMATION
+      # carry only legacy PLAYER_ID and get CAFC_PLAYER_ID added in their views.
+      - name: PLAYER_LISTS
+        description: "User-defined player shortlists."
+      - name: PLAYER_LIST_ITEMS
+        description: "Members of a shortlist. Carries PLAYER_ID + CAFC_PLAYER_ID."
+      - name: PLAYER_NOTES
+        description: "Free-text notes on a player. Legacy PLAYER_ID only."
+      - name: PLAYER_RECOMMENDATIONS
+        description: "Player recommendations workflow."
+      - name: PLAYER_STAGE_HISTORY
+        description: "Recruitment-stage transitions per player. Legacy PLAYER_ID only."
+      - name: PLAYER_INFORMATION
+        description: "Supplementary per-player info captured in-app. Legacy PLAYER_ID only."
+      - name: AGENT_PROFILES
+        description: "Agent contact profiles."
+      - name: NOTIFICATIONS
+        description: "In-app user notifications."
+      - name: STATUS_HISTORY
+        description: "Generic status-change audit."
+      - name: SHARED_REPORT_LINKS
+        description: "Shareable scout-report links."
+      - name: SCOUT_ASSIGNMENTS
+        description: "Scout assignment headers."
+      - name: SCOUT_ASSIGNMENT_AUDIT
+        description: "Scout assignment audit trail."
+      - name: SCOUT_ASSIGNMENT_PLAYERS
+        description: "Players within a scout assignment."
