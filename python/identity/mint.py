@@ -22,6 +22,75 @@ if TYPE_CHECKING:
 log = logging.getLogger("cafc.identity.mint")
 
 
+def mint_players_bulk(cur, exts: "list[NewExternalPlayer]") -> "list[int]":
+    """
+    Mint N new canonical players in a handful of round-trips instead of 3N.
+
+    Allocates a block of CAFC_PLAYER_IDs from the sequence in one call
+    (NEXTVAL over a GENERATOR), then batch-inserts the CORE.PLAYERS rows and
+    their primary CORE.PLAYER_IDENTITIES rows via executemany. Returns the new
+    CAFC_PLAYER_IDs aligned positionally to `exts`.
+
+    Caller owns the surrounding transaction. Same invariants as mint_player:
+    append-only IDs, IS_PRIMARY=TRUE on the minted player's identity row.
+    """
+    if not exts:
+        return []
+
+    # One sequence call yields N distinct values (sequences are monotonic, so
+    # the block is unique and append-only). ROWCOUNT must be a literal, and
+    # len() is a trusted int, so format it directly.
+    cur.execute(
+        "SELECT CAFC_DB.CORE.CAFC_PLAYER_ID_SEQ.NEXTVAL "
+        f"FROM TABLE(GENERATOR(ROWCOUNT => {len(exts)}))"
+    )
+    new_ids = [int(r[0]) for r in cur.fetchall()]
+    if len(new_ids) != len(exts):
+        raise RuntimeError(
+            f"sequence block size mismatch: asked {len(exts)}, got {len(new_ids)}"
+        )
+
+    cur.executemany(
+        """
+        INSERT INTO CAFC_DB.CORE.PLAYERS
+          (CAFC_PLAYER_ID, DISPLAY_NAME, BIRTH_DATE, CREATED_FROM_SOURCE)
+        VALUES (%(cafc)s, %(name)s, %(dob)s, %(src)s)
+        """,
+        [
+            {
+                "cafc": nid,
+                "name": e.source_name or f"unknown ({e.source_system}:{e.source_player_id})",
+                "dob":  e.source_birth_date,
+                "src":  e.source_system,
+            }
+            for e, nid in zip(exts, new_ids)
+        ],
+    )
+
+    cur.executemany(
+        """
+        INSERT INTO CAFC_DB.CORE.PLAYER_IDENTITIES
+          (CAFC_PLAYER_ID, SOURCE_SYSTEM, SOURCE_PLAYER_ID,
+           SOURCE_NAME, SOURCE_BIRTH_DATE, MATCH_CONFIDENCE, IS_PRIMARY)
+        VALUES (%(cafc)s, %(src)s, %(ext_id)s, %(name)s, %(dob)s, 100, TRUE)
+        """,
+        [
+            {
+                "cafc":   nid,
+                "src":    e.source_system,
+                "ext_id": e.source_player_id,
+                "name":   e.source_name,
+                "dob":    e.source_birth_date,
+            }
+            for e, nid in zip(exts, new_ids)
+        ],
+    )
+
+    log.debug("Bulk-minted %d players (CAFC_PLAYER_ID %d..%d)",
+              len(new_ids), min(new_ids), max(new_ids))
+    return new_ids
+
+
 def mint_player(cur, ext: "NewExternalPlayer") -> int:
     """
     Mint a new CAFC_PLAYER_ID and link `ext` to it.

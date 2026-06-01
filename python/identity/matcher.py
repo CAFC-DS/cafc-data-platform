@@ -287,56 +287,75 @@ def classify_all(
 
 def apply_decisions(cur, decisions: list[MatchDecision], run_id: int) -> dict[str, int]:
     """
-    Persist matcher decisions. Caller is responsible for transaction
-    management (BEGIN/COMMIT) and for having opened a CORE.INGESTION_RUNS
-    row to supply run_id. Returns per-outcome counts.
+    Persist matcher decisions in batches. Caller is responsible for transaction
+    management and for having opened a CORE.INGESTION_RUNS row to supply run_id.
+    Returns per-outcome counts.
 
-    Does NOT call commit() — the caller drives the transaction so that
-    upstream extractor writes and matcher writes commit together.
+    Batched rather than row-by-row: links go in one executemany, mints go
+    through mint_players_bulk (one sequence-block allocation + two
+    executemany inserts), candidates are queued last. This collapses what was
+    ~3N round-trips into a small constant number — a full-base backfill drops
+    from tens of minutes to seconds.
+
+    Does NOT call commit() — the caller drives the transaction so that upstream
+    extractor writes and matcher writes commit together.
     """
     counts = {"OVERRIDE": 0, "LINK_EXISTING": 0, "MINT_NEW": 0, "AMBIGUOUS": 0}
+    links: list[MatchDecision] = []
+    mints: list[MatchDecision] = []
+    ambiguous: list[MatchDecision] = []
 
     for d in decisions:
-        ext = d.external
-        if d.outcome == "OVERRIDE":
-            _insert_identity_link(
-                cur, ext, cafc_player_id=d.cafc_player_id, match_reason="override"
-            )
-        elif d.outcome == "LINK_EXISTING":
-            _insert_identity_link(
-                cur, ext, cafc_player_id=d.cafc_player_id, match_reason="name+dob exact"
-            )
-        elif d.outcome == "MINT_NEW":
-            new_id = mint_mod.mint_player(cur, ext)
-            d.cafc_player_id = new_id
-        elif d.outcome == "AMBIGUOUS":
-            candidates_mod.queue_candidates(cur, ext, d.candidate_ids, run_id=run_id)
         counts[d.outcome] += 1
+        if d.outcome in ("OVERRIDE", "LINK_EXISTING"):
+            links.append(d)
+        elif d.outcome == "MINT_NEW":
+            mints.append(d)
+        elif d.outcome == "AMBIGUOUS":
+            ambiguous.append(d)
+
+    # Links: attach a new external pair to an already-canonical player, so
+    # IS_PRIMARY=FALSE (the existing player already owns its primary row).
+    if links:
+        _insert_identity_links(cur, links)
+
+    # Mints: allocate a sequence block + batch-insert PLAYERS and their primary
+    # identity rows; backfill the assigned ids onto the decisions.
+    if mints:
+        new_ids = mint_mod.mint_players_bulk(cur, [d.external for d in mints])
+        for d, nid in zip(mints, new_ids):
+            d.cafc_player_id = nid
+
+    # Ambiguous: queued for human review (typically few; left row-by-row for
+    # its idempotent NOT-EXISTS guard).
+    for d in ambiguous:
+        candidates_mod.queue_candidates(cur, d.external, d.candidate_ids, run_id=run_id)
+
     return counts
 
 
-def _insert_identity_link(
-    cur, ext: NewExternalPlayer, *, cafc_player_id: int, match_reason: str
-) -> None:
-    """Insert a CORE.PLAYER_IDENTITIES row that ties this external pair to CAFC_PLAYER_ID."""
-    cur.execute(
+def _insert_identity_links(cur, links: list[MatchDecision]) -> None:
+    """Batch-insert CORE.PLAYER_IDENTITIES rows for OVERRIDE / LINK_EXISTING
+    decisions (IS_PRIMARY=FALSE; confidence 100 — override is a human decision,
+    link is an exact normalized match)."""
+    cur.executemany(
         """
         INSERT INTO CAFC_DB.CORE.PLAYER_IDENTITIES
           (CAFC_PLAYER_ID, SOURCE_SYSTEM, SOURCE_PLAYER_ID,
            SOURCE_NAME, SOURCE_BIRTH_DATE, MATCH_CONFIDENCE, IS_PRIMARY)
         VALUES
-          (%(cafc)s, %(src)s, %(ext_id)s, %(name)s, %(dob)s, %(conf)s, FALSE)
+          (%(cafc)s, %(src)s, %(ext_id)s, %(name)s, %(dob)s, 100, FALSE)
         """,
-        {
-            "cafc":   cafc_player_id,
-            "src":    ext.source_system,
-            "ext_id": ext.source_player_id,
-            "name":   ext.source_name,
-            "dob":    ext.source_birth_date,
-            # OVERRIDE rows are still confidence 100 — the human decided. LINK_EXISTING
-            # rows are also 100 because we link only on exact normalized match.
-            "conf":   100,
-        },
+        [
+            {
+                "cafc":   d.cafc_player_id,
+                "src":    d.external.source_system,
+                "ext_id": d.external.source_player_id,
+                "name":   d.external.source_name,
+                "dob":    d.external.source_birth_date,
+            }
+            for d in links
+        ],
     )
 
 
