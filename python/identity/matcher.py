@@ -361,6 +361,12 @@ def run(
         Apply inside the caller's envelope. Caller (typically the
         orchestrator) is responsible for opening and closing the run row.
     """
+    # Normalize to the canonical uppercase form. SOURCE_SYSTEM is stored
+    # uppercase ('IMPECT', 'MANUAL') and every Snowflake string comparison here
+    # is case-sensitive, so a lowercase --source would match no existing
+    # identities and treat the entire player base as new (re-minting everyone).
+    source_system = source_system.strip().upper()
+
     conn = _snowflake.get_connection()
     try:
         with conn.cursor() as cur:

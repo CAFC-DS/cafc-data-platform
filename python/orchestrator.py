@@ -160,9 +160,20 @@ def step_extract_impect() -> None:
 
 
 def step_dbt_build(*, select: str, target: str) -> None:
-    """Step 3 + step 5 — invoke dbt build with a model selector."""
+    """
+    Step 3 + step 5 — invoke dbt build with a model selector.
+
+    --indirect-selection=cautious is essential for staged builds: by default
+    (eager) dbt runs a test if *any* of its parents are selected, so a
+    cross-layer singular test like no_orphan_kpis (which refs a staging model
+    AND core_player_id_resolutions) would fire during the staging-only build —
+    and fail with "object does not exist" on a fresh target where the canonical
+    models aren't built yet. Cautious only runs a test when *all* its parents
+    are in the selection, so cross-layer tests defer to the final `dbt test`.
+    """
     dbt = REPO_ROOT / ".venv" / "bin" / "dbt"
     cmd = [str(dbt), "build", "--select", select, "--target", target,
+           "--indirect-selection", "cautious",
            "--project-dir", str(DBT_PROJECT_DIR)]
     _run_subprocess(cmd, cwd=REPO_ROOT, label=f"dbt build {select}")
 
@@ -213,6 +224,11 @@ def refresh(
     """
     Run one refresh end-to-end. Returns the exit code (0 success, non-zero failure).
     """
+    # Canonicalize SOURCE_SYSTEM to uppercase — it's stored uppercase and every
+    # downstream comparison (matcher identity joins, override lookups) is
+    # case-sensitive. A lowercase --source would make the matcher treat the
+    # whole player base as unlinked and re-mint it.
+    source_system = source_system.strip().upper()
     triggered_by = triggered_by or os.environ.get("USER", "manual")
 
     with _connection() as conn:
