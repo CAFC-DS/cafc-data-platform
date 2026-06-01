@@ -51,6 +51,29 @@ def merge_player(
     if loser_cafc_player_id == winner_cafc_player_id:
         raise ValueError("loser and winner must differ")
 
+    # 0. Fail fast on bad IDs. A typo'd --winner would otherwise re-point
+    #    identities onto a non-existent CAFC_PLAYER_ID (orphaning them, caught
+    #    only later by no_orphan_kpis), and merging into an already-retired
+    #    player is almost always a mistake.
+    cur.execute(
+        """
+        SELECT CAFC_PLAYER_ID, IS_ACTIVE
+        FROM CAFC_DB.CORE.PLAYERS
+        WHERE CAFC_PLAYER_ID IN (%(loser)s, %(winner)s)
+        """,
+        {"loser": loser_cafc_player_id, "winner": winner_cafc_player_id},
+    )
+    found = {int(r[0]): r[1] for r in cur.fetchall()}
+    if winner_cafc_player_id not in found:
+        raise ValueError(f"winner CAFC_PLAYER_ID={winner_cafc_player_id} not found in CORE.PLAYERS")
+    if loser_cafc_player_id not in found:
+        raise ValueError(f"loser CAFC_PLAYER_ID={loser_cafc_player_id} not found in CORE.PLAYERS")
+    if found[winner_cafc_player_id] is False:
+        raise ValueError(
+            f"winner CAFC_PLAYER_ID={winner_cafc_player_id} is IS_ACTIVE=FALSE "
+            "(already retired/merged) — pick an active winner"
+        )
+
     # 1. Re-point identities. Capture which (source_system, source_player_id) pairs
     #    moved so we can write override rows for them.
     cur.execute(
