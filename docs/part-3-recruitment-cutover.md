@@ -1,18 +1,71 @@
 # Part 3 — Recruitment-platform cutover to the canonical layer
 
-**Status:** Draft · **Date:** 2026-06-01 · **Prereq:** Part 2 complete (canonical
-layer live in prod `CAFC_DB.CORE`, identity matcher applied, `dbt test` green).
+**Status:** Data-platform prerequisites COMPLETE (2026-06-01) · App-side work NOT
+STARTED. The canonical `CAFC_DB.CORE` layer and the full `CAFC_DB.APP_COMPAT`
+bridge are live in prod, dbt-managed and validated. The remaining work is all in
+the **recruitment-platform repo** (FastAPI + React — a separate codebase).
 
-This is the *only* set of changes to the **recruitment-platform repo** (FastAPI +
-React — a separate repo). It moves the live app off `RECRUITMENT_TEST.PUBLIC.*`
-and onto the canonical platform: **reads from `CAFC_DB.APP_COMPAT`, writes to
-`CAFC_DB.CORE`** — one feature at a time, each independently reversible.
+This moves the live app off `RECRUITMENT_TEST.PUBLIC.*` onto the canonical
+platform: **reads from `CAFC_DB.APP_COMPAT`, writes to `CAFC_DB.CORE`** — one
+feature at a time, each independently reversible.
 
-It spans two repos:
-- **cafc-data-platform** (this repo): finish the `APP_COMPAT` layer + reconcile
-  the divergent views (the "Prerequisites" section).
-- **recruitment-platform**: the env-var seam + per-feature reference switch (the
-  "App changes" section).
+---
+
+## ⚠️ Handoff — READ THIS FIRST if you're starting in the recruitment-platform repo
+
+This document is a **roadmap, not a turnkey script.** The data side is done; the
+app side needs a real planning pass *in that repo* before any code changes. Do
+not paste-and-run it. Specifically:
+
+**What is already done for you (data-platform side — no action needed):**
+- `CAFC_DB.CORE`: canonical players (`CAFC_PLAYER_ID`), fixtures
+  (`CAFC_FIXTURE_ID`), dimensions, and ~455M rows of KPI/score facts. Live,
+  gender-filtered, identity-resolved, `dbt test` green.
+- `CAFC_DB.APP_COMPAT`: **all 20 legacy-shape views exist in prod**, dbt-managed,
+  each validated against the legacy table's columns/grain. `players`/`matches`
+  carry the canonical surrogate IDs + legacy IDs + `DATA_SOURCE` (`external`/
+  `internal`); `scout_reports`, `player_list_items`, `player_notes`,
+  `player_stage_history`, `player_information` carry both `PLAYER_ID` and
+  `CAFC_PLAYER_ID`.
+
+**What is NOT done / NOT verified (your job in the app repo):**
+1. **The line numbers in this doc are UNVERIFIED.** `backend/main.py:485-520`,
+   `:90-107`, `:113-150` come from the original master plan's reading of the app
+   and may be stale or wrong. **Find the real code; do not trust these.**
+2. **How the app references tables is unknown.** The central step — "replace
+   unqualified table refs with the templated form" — depends entirely on the
+   app's pattern (raw SQL strings? an ORM? a query builder? a central db
+   helper?). **Step 1 in the app repo is to find that seam**, not to change code.
+3. **Write-cutover is under-specified.** Read-only features just repoint reads
+   (easy). Read-write features (scout reports, lists, notes, recommendations)
+   need the table's *home* moved into `CORE` first — create the table in `CORE`,
+   migrate data, repoint the app's write path — which this doc only gestures at.
+4. **Verification needs a running app.** The 5-role checks (§3) are hands-on; you
+   need to run the app against a fixed user per role and diff results.
+
+**Carry-over facts from Part 2 that affect the app:**
+- **Squad IDs are NOT canonicalised** — `HOMESQUADID`/`AWAYSQUADID`/squad refs in
+  `APP_COMPAT` are still IMPECT squad IDs (a squad matcher is future work). Same
+  behaviour as legacy, so no app change needed, but don't expect a `CAFC_SQUAD_ID`.
+- **`APP_COMPAT.PLAYERS` is broader than legacy** — ~117k canonical players vs the
+  legacy ~91k (canonical includes players the legacy list didn't). Confirm the
+  app's player search/list is happy showing the larger set, or add a filter.
+- **`APP_COMPAT.*` is inert until you point the app at it** — promoting it changed
+  nothing the app sees yet; the app still reads `RECRUITMENT_TEST.PUBLIC`.
+
+**Day-1 checklist in the recruitment-platform repo (do in order):**
+1. Grep the codebase for table references (`RECRUITMENT_TEST`, `PUBLIC.`, bare
+   table names, ORM model `__tablename__`s / schema config). Write down *how*
+   and *where* tables are referenced — this determines all downstream effort.
+2. Confirm/replace the stale line numbers above with the real locations of the
+   DB-connection/query layer and the dual-ID filters.
+3. Build the **env-var seam** (§2 Phase 0): add the 3 env vars, route refs
+   through them, **defaulting to `RECRUITMENT_TEST.PUBLIC`** so the deploy is a
+   no-op. Ship and confirm nothing changed.
+4. Cut over the **first read-only feature** (search/profile), verify all 5 roles
+   (§3), flip the env var, watch, keep rollback ready.
+5. Repeat per feature in the §2 order. Tackle write-cutover (table-home move to
+   `CORE`) only when you reach those features.
 
 ---
 
@@ -52,10 +105,21 @@ cutover" per table.
 
 ---
 
-## 1. Prerequisites (in cafc-data-platform — do BEFORE touching the app)
+## 1. Prerequisites (in cafc-data-platform) — ✅ COMPLETE 2026-06-01
 
-The app can't read `APP_COMPAT` for a feature until that feature's tables have
-correct, complete views. As of 2026-06-01:
+All done and promoted to prod. Kept below for the record / context; **no action
+required here.**
+- **§1b done** — `players` (table, 117,135) and `matches` (view, 145,710) rebuilt
+  to the legacy contract: one row per player/fixture, `DATA_SOURCE`
+  `external`/`internal` exclusive, full legacy column set, context from the
+  most-recent iteration.
+- **§1a done** — all 13 missing views built; every one matches its legacy row
+  count; the 3 `PLAYER_ID`-only tables enriched with `CAFC_PLAYER_ID`.
+- **`USERS` done** — repointed to the live `RECRUITMENT_TEST.PUBLIC.USERS` (160).
+- **§1c done** — `dbt build --select tag:app_compat --target prod`: prod
+  `APP_COMPAT` now has all 20 objects, dbt-managed.
+
+<details><summary>Original prerequisite detail (for reference)</summary>
 
 ### 1a. Build the 13 missing `APP_COMPAT` views
 Only 7 of 20 app tables have a view. Missing (with row counts / id columns):
@@ -96,9 +160,14 @@ Once 1a/1b are done and dev-validated, build `tag:app_compat` to prod (drop the
 `--skip-app-compat` flag). This is the point the deferred app_compat promotion
 finally happens — coherently, all at once, with the divergences resolved.
 
+</details>
+
 ---
 
-## 2. App changes (recruitment-platform repo)
+## 2. App changes (recruitment-platform repo) — START HERE
+
+> This is where the remaining work lives. Do the **Day-1 checklist** in the
+> Handoff section above before changing any code.
 
 ### Phase 0 — the seam (one PR, zero behavior change)
 - Add the 3 env vars (master plan cites `backend/main.py:485-520`).
