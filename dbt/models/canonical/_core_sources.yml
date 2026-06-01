@@ -27,9 +27,6 @@ sources:
           - name: CAFC_PLAYER_ID
             tests: [unique, not_null]
 
-      - name: USERS
-        description: "Recruitment-platform application users. App-owned; surfaced verbatim via APP_COMPAT.USERS."
-
       - name: PLAYER_IDENTITIES
         description: "Maps (SOURCE_SYSTEM, SOURCE_PLAYER_ID) → CAFC_PLAYER_ID. Written by python/identity/matcher.py."
         columns:

@@ -28,6 +28,8 @@ sources:
         description: "Per-(scout report, attribute) scores."
       - name: SCOUT_REPORT_VIEWS
         description: "Read-receipts: which user viewed which scout report when."
+      - name: USERS
+        description: "Live application users / auth (159). Authoritative over CORE.USERS (a stale 51-row migration copy)."
 
       # Player workflow tables (§1a). PLAYER_LIST_ITEMS already carries
       # CAFC_PLAYER_ID; PLAYER_NOTES / PLAYER_STAGE_HISTORY / PLAYER_INFORMATION
