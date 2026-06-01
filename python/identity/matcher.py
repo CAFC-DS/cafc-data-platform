@@ -113,17 +113,37 @@ def normalize_name(name: Optional[str]) -> str:
 # Snowflake reads
 # ---------------------------------------------------------------------------
 
-def fetch_new_external_players(cur, source_system: str) -> list[NewExternalPlayer]:
+def fetch_new_external_players(
+    cur, source_system: str, include_womens: bool = False
+) -> list[NewExternalPlayer]:
     """
-    Every (source_system, source_player_id) pair from IMPECT_RAW.PLAYERS
+    Every distinct (source_system, source_player_id) pair from IMPECT_RAW.PLAYERS
     that isn't already in CORE.PLAYER_IDENTITIES.
 
-    Sourcing from raw IMPECT_RAW.PLAYERS rather than stg_impect__players
-    today because the staging view isn't materialized yet. Switching is
-    a one-line change once dbt run --select tag:staging has been executed.
+    Two correctness guards specific to IMPECT_RAW.PLAYERS:
+
+      - It is loaded one row per (player, iteration) appearance, so it is NOT
+        unique on ID. We dedup to one row per ID (keeping the newest
+        iteration's attributes via QUALIFY ROW_NUMBER) — otherwise a player
+        appearing in N still-unlinked iterations would be classified N times
+        and minted N times, producing N distinct CAFC_PLAYER_IDs for one human
+        (this is the likely origin of the existing handful of source_player_ids
+        that map to >1 CAFC_PLAYER_ID).
+
+      - Women's competitions are excluded platform-wide (see the loaders'
+        --include-womens and dbt's include_womens_competitions var), so FEMALE
+        players are skipped unless include_womens=True. Without this the matcher
+        would mint canonical IDs for players we deliberately keep out of the
+        platform.
+
+    Sourcing from raw IMPECT_RAW.PLAYERS rather than stg_impect__players because
+    the staging schema name is dbt-target-dependent (IMPECT_RAW_STAGING in prod,
+    IMPECT_RAW_STAGING_DEV_<user> in dev) and this Python code has no target
+    context; the gender filter here reproduces staging's exclusion directly.
     """
+    gender_clause = "" if include_womens else "AND r.GENDER = 'MALE'"
     cur.execute(
-        """
+        f"""
         SELECT
             r.ID                          AS source_player_id,
             r.COMMONNAME                  AS source_name,
@@ -133,6 +153,10 @@ def fetch_new_external_players(cur, source_system: str) -> list[NewExternalPlaye
           ON  pi.SOURCE_SYSTEM    = %(src)s
           AND pi.SOURCE_PLAYER_ID = r.ID::VARCHAR
         WHERE pi.PLAYER_IDENTITY_ID IS NULL
+          {gender_clause}
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY r.ID ORDER BY r.ITERATION_ID DESC NULLS LAST
+        ) = 1
         """,
         {"src": source_system},
     )
@@ -324,6 +348,7 @@ def run(
     source_system: str = "IMPECT",
     dry_run: bool = True,
     run_id: Optional[int] = None,
+    include_womens: bool = False,
 ) -> dict[str, int]:
     """
     Entry point. Returns per-outcome counts.
@@ -340,8 +365,9 @@ def run(
     try:
         with conn.cursor() as cur:
             log.info("Fetching new external players for %s…", source_system)
-            externals = fetch_new_external_players(cur, source_system)
-            log.info("  %d new (source_system, source_player_id) pairs to classify.", len(externals))
+            externals = fetch_new_external_players(cur, source_system, include_womens=include_womens)
+            log.info("  %d new (source_system, source_player_id) pairs to classify%s.",
+                     len(externals), "" if include_womens else " (women's excluded)")
 
             overrides = fetch_overrides(cur, source_system)
             log.info("  %d override rows loaded.", len(overrides))
@@ -442,6 +468,9 @@ def _build_argparser() -> argparse.ArgumentParser:
                    help="SOURCE_SYSTEM to match (default: IMPECT).")
     p.add_argument("--apply", action="store_true",
                    help="Actually write to Snowflake. Default is dry-run.")
+    p.add_argument("--include-womens", action="store_true",
+                   help="Override the platform-wide women's-competition exclusion and "
+                        "classify/mint women's players too. Off by default.")
     p.add_argument("--verbose", "-v", action="store_true",
                    help="Enable DEBUG logging.")
     return p
@@ -454,7 +483,8 @@ if __name__ == "__main__":
         format="%(asctime)s  %(levelname)-7s  %(name)s  %(message)s",
     )
     try:
-        run(source_system=args.source, dry_run=not args.apply)
+        run(source_system=args.source, dry_run=not args.apply,
+            include_womens=args.include_womens)
     except KeyboardInterrupt:
         print("\nInterrupted.")
         sys.exit(130)
