@@ -372,3 +372,36 @@ This is the *only* change to the recruitment-platform repo in this whole plan. I
 2. Move `cafc_utils` into the new repo (proposed), or keep it separate and `pip install -e` it as a dependency?
 3. dbt + Snowflake Tasks for scheduling (proposed, simplest), or Dagster/Airflow from day one?
 4. Single `DATA_PLATFORM_ROLE` for all writes (proposed), or separate roles per pipeline stage?
+
+---
+
+## Appendix — Future option: native Snowflake scheduling (dbt Projects on Snowflake + Tasks)
+
+To evaluate once Part 2 is in prod, as an alternative/complement to the GitHub
+Actions `nightly.yml`. Snowflake now offers **dbt Projects on Snowflake** — a
+native `DBT PROJECT` object that stores a dbt Core project in a schema (synced
+from a Git repository integration), runs it in-warehouse via
+`EXECUTE DBT PROJECT …` or the Workspaces UI, and shows run history in Snowsight.
+`DEV_ROLE` already has the `CREATE DBT PROJECT` privilege on `CORE`.
+
+Why it's attractive here: it keeps dbt execution next to the data, inside the
+existing Snowflake security model, schedulable by a **Snowflake Task** — matching
+this plan's zero-extra-billing posture (compute only; no dbt Cloud, no external
+orchestrator).
+
+The catch — it runs **dbt only**. Our refresh interleaves Python and dbt
+(`orchestrator.py`: extract → staging → identity matcher → facts → test), and
+dbt Projects on Snowflake can't run the Python extractors or `matcher.py`. So a
+native-Snowflake refresh would be a **split**:
+
+- **dbt layer** (staging / dimensions / facts / app_compat / tests) → a
+  `DBT PROJECT` run on a schedule via a Task.
+- **Python layer** (IMPECT extract, identity matcher) → still needs a runner:
+  a Snowflake Task calling a stored procedure / external compute, a Snowpark
+  container, or GitHub Actions — and it must run **between** staging and facts
+  (the matcher mints/links before facts resolve through it), so the ordering in
+  `orchestrator.py` still has to be honoured by whatever schedules the pieces.
+
+Net: a candidate for hosting the SQL half of the nightly refresh once we're in
+prod; it does not replace the orchestrator, because the Python identity step
+sits in the middle of the DAG. Decide alongside open question #3.
