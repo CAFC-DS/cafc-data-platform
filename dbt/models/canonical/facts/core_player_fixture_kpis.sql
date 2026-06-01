@@ -1,10 +1,19 @@
 /*
   core_player_fixture_kpis
   ------------------------
-  Per-(player, fixture, KPI) values, canonicalised across providers.
+  Per-(player, fixture, KPI, squad, position) values, canonicalised across
+  providers. IMPECT logs each KPI once per position a player occupied during
+  the match (a player who played CB then RB has that KPI on two rows with
+  different position_code and play_duration_seconds), so position_code and
+  impect_squad_id are part of the natural grain — NOT (player, fixture, kpi)
+  alone, which collides ~1.3M times. Collapsing positions into a single
+  per-(player, fixture, kpi) value is deferred to when kpi_definitions (plan
+  §2.3) lands, since the correct collapse is per-KPI (sum for additive metrics,
+  weighted-mean for rates) and can't be done safely without those rules.
 
   Materialization: incremental MERGE keyed on the natural composite
-  (cafc_player_id, cafc_fixture_id, cafc_kpi_id). Per dbt_project.yml:
+  (cafc_player_id, cafc_fixture_id, cafc_kpi_id, impect_squad_id,
+  position_code). Per dbt_project.yml:
     on_schema_change: append_new_columns  (new IMPECT KPI fields auto-added)
     incremental_strategy: merge           (UPSERT semantics)
 
@@ -27,7 +36,7 @@
 
 {{ config(
     materialized='incremental',
-    unique_key=['cafc_player_id', 'cafc_fixture_id', 'cafc_kpi_id'],
+    unique_key=['cafc_player_id', 'cafc_fixture_id', 'cafc_kpi_id', 'impect_squad_id', 'position_code'],
     on_schema_change='append_new_columns',
     incremental_strategy='merge'
 ) }}

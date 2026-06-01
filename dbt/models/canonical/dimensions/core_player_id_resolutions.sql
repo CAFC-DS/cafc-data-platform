@@ -30,12 +30,33 @@ with overrides as (
     from {{ source('core', 'PLAYER_IDENTITY_OVERRIDES') }}
 ),
 
+-- PLAYER_IDENTITIES carries one row per (player, source squad/context)
+-- appearance, so it is NOT unique on (source_system, source_player_id) —
+-- ~3.7 rows per IMPECT player. Collapse to the single canonical link per pair
+-- so downstream fact joins don't fan out: prefer IS_PRIMARY, then highest
+-- MATCH_CONFIDENCE, then most-recently updated, then lowest CAFC_PLAYER_ID as
+-- a stable deterministic tiebreak (84 players legitimately map to >1 id).
 identities as (
     select
         source_system,
         source_player_id,
-        cafc_player_id    as linked_cafc_player_id
-    from {{ source('core', 'PLAYER_IDENTITIES') }}
+        linked_cafc_player_id
+    from (
+        select
+            source_system,
+            source_player_id,
+            cafc_player_id    as linked_cafc_player_id,
+            row_number() over (
+                partition by source_system, source_player_id
+                order by
+                    case when is_primary then 0 else 1 end,
+                    match_confidence desc nulls last,
+                    updated_at desc nulls last,
+                    cafc_player_id
+            )                 as rn
+        from {{ source('core', 'PLAYER_IDENTITIES') }}
+    )
+    where rn = 1
 ),
 
 merged as (
