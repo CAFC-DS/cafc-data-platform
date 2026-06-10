@@ -53,15 +53,20 @@ def mint_players_bulk(cur, exts: "list[NewExternalPlayer]") -> "list[int]":
     cur.executemany(
         """
         INSERT INTO CAFC_DB.CORE.PLAYERS
-          (CAFC_PLAYER_ID, DISPLAY_NAME, BIRTH_DATE, CREATED_FROM_SOURCE)
-        VALUES (%(cafc)s, %(name)s, %(dob)s, %(src)s)
+          (CAFC_PLAYER_ID, DISPLAY_NAME, COMMON_NAME, FIRST_NAME, LAST_NAME,
+           BIRTH_DATE, CREATED_FROM_SOURCE)
+        VALUES (%(cafc)s, %(name)s, %(common)s, %(first)s, %(last)s,
+                %(dob)s, %(src)s)
         """,
         [
             {
-                "cafc": nid,
-                "name": e.source_name or f"unknown ({e.source_system}:{e.source_player_id})",
-                "dob":  e.source_birth_date,
-                "src":  e.source_system,
+                "cafc":   nid,
+                "name":   e.source_name or f"unknown ({e.source_system}:{e.source_player_id})",
+                "common": e.source_name or None,
+                "first":  e.source_first_name or None,
+                "last":   e.source_last_name or None,
+                "dob":    e.source_birth_date,
+                "src":    e.source_system,
             }
             for e, nid in zip(exts, new_ids)
         ],
@@ -118,15 +123,19 @@ def mint_player(cur, ext: "NewExternalPlayer") -> int:
     cur.execute(
         """
         INSERT INTO CAFC_DB.CORE.PLAYERS
-          (CAFC_PLAYER_ID, DISPLAY_NAME, BIRTH_DATE, CREATED_FROM_SOURCE)
+          (CAFC_PLAYER_ID, DISPLAY_NAME, COMMON_NAME, FIRST_NAME, LAST_NAME,
+           BIRTH_DATE, CREATED_FROM_SOURCE)
         VALUES
-          (%(cafc)s, %(name)s, %(dob)s, %(src)s)
+          (%(cafc)s, %(name)s, %(common)s, %(first)s, %(last)s, %(dob)s, %(src)s)
         """,
         {
-            "cafc": new_cafc_player_id,
-            "name": display_name,
-            "dob":  ext.source_birth_date,
-            "src":  ext.source_system,
+            "cafc":   new_cafc_player_id,
+            "name":   display_name,
+            "common": ext.source_name or None,
+            "first":  ext.source_first_name or None,
+            "last":   ext.source_last_name or None,
+            "dob":    ext.source_birth_date,
+            "src":    ext.source_system,
         },
     )
 

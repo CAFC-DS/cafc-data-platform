@@ -82,7 +82,8 @@ squads as (
 )
 
 select
-    ii.source_player_id                              as PLAYERID,
+    -- Legacy PLAYERS.PLAYERID is NUMBER; identities store source ids as text.
+    try_to_number(ii.source_player_id)               as PLAYERID,
     c.display_name                                   as PLAYERNAME,
     c.first_name                                     as FIRSTNAME,
     c.last_name                                      as LASTNAME,

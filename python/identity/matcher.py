@@ -65,8 +65,10 @@ Outcome = Literal["OVERRIDE", "LINK_EXISTING", "MINT_NEW", "AMBIGUOUS"]
 class NewExternalPlayer:
     source_system: str          # 'IMPECT', 'MANUAL', etc.
     source_player_id: str
-    source_name: str
+    source_name: str            # provider common name — the matching key
     source_birth_date: Optional[date]
+    source_first_name: str = ""
+    source_last_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -147,7 +149,9 @@ def fetch_new_external_players(
         SELECT
             r.ID                          AS source_player_id,
             r.COMMONNAME                  AS source_name,
-            TRY_TO_DATE(r.BIRTHDATE)      AS source_birth_date
+            TRY_TO_DATE(r.BIRTHDATE)      AS source_birth_date,
+            r.FIRSTNAME                   AS source_first_name,
+            r.LASTNAME                    AS source_last_name
         FROM CAFC_DB.IMPECT_RAW.PLAYERS r
         LEFT JOIN CAFC_DB.CORE.PLAYER_IDENTITIES pi
           ON  pi.SOURCE_SYSTEM    = %(src)s
@@ -166,6 +170,8 @@ def fetch_new_external_players(
             source_player_id=str(row[0]),
             source_name=row[1] or "",
             source_birth_date=row[2],
+            source_first_name=row[3] or "",
+            source_last_name=row[4] or "",
         )
         for row in cur.fetchall()
     ]
