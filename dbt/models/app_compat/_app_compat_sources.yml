@@ -14,30 +14,45 @@ version: 2
 # ============================================================================
 
 sources:
-  - name: recruitment_legacy
-    description: "Live app-owned tables in RECRUITMENT_TEST.PUBLIC. Written by the recruitment app, not dbt. Bridged into APP_COMPAT until Part 3 cutover."
-    database: RECRUITMENT_TEST
-    schema: PUBLIC
+  # Phase 3 (scout reports + lists) tables moved to CAFC_DB.CORE — their
+  # canonical home — via snowflake/ddl/20260610_phase3_move_scout_lists_to_core.sql.
+  # The app writes them there directly once CORE_DB_SCHEMA=CORE flips
+  # (runbook: docs/runbooks/phase-3-cutover.md). Still not dbt-managed —
+  # user-generated data, dbt only bridges shape.
+  - name: core_app
+    description: "App-owned tables in CAFC_DB.CORE (moved from RECRUITMENT_TEST.PUBLIC at Phase 3 cutover). Written by the recruitment app, not dbt."
+    database: CAFC_DB
+    schema: CORE
 
     tables:
-      - name: POSITION_ATTRIBUTES
-        description: "Per-position attribute catalogue used by scout-report scoring."
       - name: SCOUT_REPORTS
-        description: "Scout reports written in the app. Carries PLAYER_ID (legacy) + CAFC_PLAYER_ID (canonical). The authoritative live home; CORE.SCOUT_REPORTS_TEST that an earlier APP_COMPAT view pointed at has been dropped."
+        description: "Scout reports written in the app. Carries PLAYER_ID (legacy) + CAFC_PLAYER_ID (canonical)."
       - name: SCOUT_REPORT_ATTRIBUTE_SCORES
         description: "Per-(scout report, attribute) scores."
       - name: SCOUT_REPORT_VIEWS
         description: "Read-receipts: which user viewed which scout report when."
-      - name: USERS
-        description: "Live application users / auth (159). Authoritative over CORE.USERS (a stale 51-row migration copy)."
-
-      # Player workflow tables (§1a). PLAYER_LIST_ITEMS already carries
-      # CAFC_PLAYER_ID; PLAYER_NOTES / PLAYER_STAGE_HISTORY / PLAYER_INFORMATION
-      # carry only legacy PLAYER_ID and get CAFC_PLAYER_ID added in their views.
       - name: PLAYER_LISTS
         description: "User-defined player shortlists."
       - name: PLAYER_LIST_ITEMS
         description: "Members of a shortlist. Carries PLAYER_ID + CAFC_PLAYER_ID."
+      - name: POSITION_ATTRIBUTES
+        description: "Per-position attribute catalogue used by scout-report scoring. App reads only."
+      - name: SHARED_REPORT_LINKS
+        description: "Shareable scout-report links."
+
+  - name: recruitment_legacy
+    description: "Live app-owned tables in RECRUITMENT_TEST.PUBLIC. Written by the recruitment app, not dbt. Bridged into APP_COMPAT until each table's cutover phase moves it to CORE."
+    database: RECRUITMENT_TEST
+    schema: PUBLIC
+
+    tables:
+      - name: USERS
+        description: "Live application users / auth (159). Authoritative over CORE.USERS (a stale 51-row migration copy)."
+
+      # Player workflow tables (§1a). PLAYER_NOTES / PLAYER_STAGE_HISTORY /
+      # PLAYER_INFORMATION carry only legacy PLAYER_ID and get CAFC_PLAYER_ID
+      # added in their views. (Scout reports + lists tables moved to the
+      # core_app source above at Phase 3.)
       - name: PLAYER_NOTES
         description: "Free-text notes on a player. Legacy PLAYER_ID only."
       - name: PLAYER_RECOMMENDATIONS
@@ -52,8 +67,6 @@ sources:
         description: "In-app user notifications."
       - name: STATUS_HISTORY
         description: "Generic status-change audit."
-      - name: SHARED_REPORT_LINKS
-        description: "Shareable scout-report links."
       - name: SCOUT_ASSIGNMENTS
         description: "Scout assignment headers."
       - name: SCOUT_ASSIGNMENT_AUDIT

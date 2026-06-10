@@ -4,4 +4,4 @@
   App-owned legacy passthrough; bridged until Part 3 cutover (docs/decisions/0001).
 */
 
-select * from {{ source('recruitment_legacy', 'PLAYER_LIST_ITEMS') }}
+select * from {{ source('core_app', 'PLAYER_LIST_ITEMS') }}

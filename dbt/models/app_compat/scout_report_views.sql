@@ -5,4 +5,4 @@
   passthrough; bridged until the Part 3 cutover (docs/decisions/0001).
 */
 
-select * from {{ source('recruitment_legacy', 'SCOUT_REPORT_VIEWS') }}
+select * from {{ source('core_app', 'SCOUT_REPORT_VIEWS') }}
