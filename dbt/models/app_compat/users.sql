@@ -7,4 +7,4 @@
   served stale auth data. Bridged until the Part 3 cutover.
 */
 
-select * from {{ source('recruitment_legacy', 'USERS') }}
+select * from {{ source('core_app', 'USERS') }}

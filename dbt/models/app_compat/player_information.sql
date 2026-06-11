@@ -9,7 +9,7 @@
 select
     pi.*,
     r.cafc_player_id as CAFC_PLAYER_ID
-from {{ source('recruitment_legacy', 'PLAYER_INFORMATION') }} pi
+from {{ source('core_app', 'PLAYER_INFORMATION') }} pi
 left join {{ ref('core_player_id_resolutions') }} r
   on  r.source_system    = 'IMPECT'
   and r.source_player_id = pi.PLAYER_ID::varchar

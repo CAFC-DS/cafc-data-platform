@@ -4,4 +4,4 @@
   App-owned legacy passthrough; bridged until Part 3 cutover (docs/decisions/0001).
 */
 
-select * from {{ source('recruitment_legacy', 'STATUS_HISTORY') }}
+select * from {{ source('core_app', 'STATUS_HISTORY') }}

@@ -10,7 +10,7 @@
 select
     n.*,
     r.cafc_player_id as CAFC_PLAYER_ID
-from {{ source('recruitment_legacy', 'PLAYER_NOTES') }} n
+from {{ source('core_app', 'PLAYER_NOTES') }} n
 left join {{ ref('core_player_id_resolutions') }} r
   on  r.source_system    = 'IMPECT'
   and r.source_player_id = n.PLAYER_ID::varchar
