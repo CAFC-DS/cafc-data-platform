@@ -41,11 +41,20 @@ Gated by the app's `WRITES_TO_CORE` flag (true when `WRITE_DB=CAFC_DB` and
 
 ## Cutover-day order (delta to phase-3 runbook)
 
+0. **Fresh IMPECT refresh first** (orchestrator) — soak testing 2026-06-11
+   found canonical fixtures lag legacy (~400/mo missing Apr–May, max date
+   2026-12-05 vs 2026-12-29) because refreshes are manual; 790/8443 scout
+   reports lose their match link on stale data. Refresh, then re-check.
 1. Run the Phase 3 clone script (its runbook, states A→C).
 2. Run `20260611_phase5_app_entity_write_grants.sql`.
-3. `dbt build --select app_compat` so `players_base` materialises and the
+3. Run `20260611_phase5_remap_legacy_player_ids.sql` (dry-run blocks first)
+   — repoints cloned app rows that reference legacy manual CAFC ids /
+   superseded IMPECT ids to canonical ids. Found 2026-06-11: 13 list items
+   + 69 scout reports unresolved canonically; 8 list items map via MANUAL
+   identities, 5 are broken in legacy too (deleted players).
+4. `dbt build --select app_compat` so `players_base` materialises and the
    `players` view is created before the app flips.
-4. Flip the app env: drop `WRITE_DB`, set `CORE_DB_SCHEMA=CORE`
+5. Flip the app env: drop `WRITE_DB`, set `CORE_DB_SCHEMA=CORE`
    (`CANONICAL_DB=CAFC_DB`, `PLATFORM_DB_SCHEMA=APP_COMPAT` as in Phase 3).
 
 ## Verification
