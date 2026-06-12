@@ -57,6 +57,26 @@ Gated by the app's `WRITES_TO_CORE` flag (true when `WRITE_DB=CAFC_DB` and
 5. Flip the app env: drop `WRITE_DB`, set `CORE_DB_SCHEMA=CORE`
    (`CANONICAL_DB=CAFC_DB`, `PLATFORM_DB_SCHEMA=APP_COMPAT` as in Phase 3).
 
+## Round-3 rehearsal results (2026-06-12)
+
+Full-cutover rehearsal PASSED end-to-end: phase-4 clones parity 7/7; all 14
+app-owned APP_COMPAT views repointed to CORE (then reverted to passthrough);
+login via cloned CORE.USERS; player + match minted into CORE with MANUAL
+identity rows; match instantly visible via the live matches view; live-tail
+query picks up the minted player; scout report / intel / note / list+stage /
+user writes all landed CORE-only with legacy provably untouched; free-text
+match rejected; all test rows removed. Caught and fixed in the app:
+internal-match universal ids ('manual' vs 'internal' id_type), HTTPException
+swallowed to 500, Decimal-formatted ids breaking universal-id parsing.
+
+Operational notes for the real window:
+- The whole-DB snapshot needs account-level CREATE DATABASE — run it under
+  SYSADMIN/ACCOUNTADMIN; DEV_ROLE cannot.
+- Clones taken outside a freeze drift: legacy and CORE autoincrement streams
+  diverge and re-use the same ids (seen: legacy report 134401 vs rehearsal
+  CORE 134401). Harmless ONLY because the real clone happens inside the
+  write freeze — never soft-launch CORE writes without re-cloning.
+
 ## Verification
 
 - Add Player via API → row in CORE.PLAYERS + PLAYER_IDENTITIES (MANUAL),
