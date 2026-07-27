@@ -205,6 +205,18 @@ def make_request(endpoint: str, params: Optional[Dict] = None,
                 refreshed_token_this_call = True
                 continue
 
+            # Other 4xx errors are permanent (bad request, not found, etc.) --
+            # confirmed live that Impect returns 400 with a real error message
+            # (e.g. "Match does not have packing plus data" for matches
+            # predating event-level tracking) rather than an empty payload.
+            # Retrying these with backoff wastes minutes per call for no
+            # benefit; raise immediately so callers can distinguish "this
+            # match genuinely has no data" from a transient failure.
+            if 400 <= response.status_code < 500 and response.status_code not in (401, 429):
+                raise Exception(
+                    f"{response.status_code} error from {endpoint}: {response.text[:300]}"
+                )
+
             response.raise_for_status()
             return response.json()
 
@@ -272,6 +284,27 @@ def get_match_player_kpis(match_id: int, params: Optional[Dict] = None) -> Dict[
         Player KPI payload
     """
     return make_request(f"/v5/customerapi/matches/{match_id}/player-kpis", params)
+
+
+def get_match_events(match_id: int, params: Optional[Dict] = None) -> Dict[str, Any]:
+    """
+    Get raw match events for a specific match.
+
+    Args:
+        match_id: Match ID
+        params: Optional query parameters
+
+    Returns:
+        Event payload (list of event dicts under "data").
+
+    Raises:
+        Exception (via make_request): confirmed live that matches predating
+        Impect's event-level tracking return HTTP 400 with
+        {"message": "Match does not have packing plus data"} rather than an
+        empty list -- callers should treat a 400 here as "no event data for
+        this match", not a transient failure worth retrying at a higher level.
+    """
+    return make_request(f"/v5/customerapi/matches/{match_id}/events", params)
 
 
 def get_match_squad_kpis(match_id: int, params: Optional[Dict] = None) -> Dict[str, Any]:

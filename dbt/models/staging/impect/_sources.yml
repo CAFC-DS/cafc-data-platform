@@ -117,6 +117,16 @@ sources:
           - name: CURRENTSQUADID
             description: "FLOAT in raw because IMPECT serializes NULLs as NaN; staging casts to NUMBER."
 
+      - name: EVENTS
+        description: "IMPECT raw match events (one row per on-ball event), landed by load_match_events.py. Event-level data only exists from dataVersion V2 onward (season 21/22+ for most competitions, confirmed empirically 2026-07-24) -- pre-V2 matches simply have no rows here, not an extraction gap."
+        columns:
+          - name: MATCH_ID
+            tests: [not_null]
+          - name: EVENT_ID
+            tests: [not_null]
+          - name: PLAYER_ID
+            description: "IMPECT player ID of the event's primary player. Nullable -- some event types (e.g. formation changes) carry no player."
+
       - name: MATCHES
         description: "IMPECT fixtures across all iterations. The MATCHDAY.* columns are dot-named from JSON flattening."
         columns:
