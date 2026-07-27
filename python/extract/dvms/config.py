@@ -37,6 +37,12 @@ SNOWFLAKE_SCHEMA = os.getenv("SNOWFLAKE_SCHEMA", "DVMS_RAW")
 REQUEST_TIMEOUT = 30
 DOWNLOAD_TIMEOUT = 60
 
+# Positional tracking files run ~420MB/match — DOWNLOAD_TIMEOUT above is far
+# too short (it's sized for the <1MB small-asset feeds). This is a
+# read-timeout-between-chunks value for a streamed download, not a total
+# transfer cap.
+POSITIONAL_DOWNLOAD_TIMEOUT = 600
+
 # Seconds to sleep before every asset download. A 2026-07-17 test run of
 # ~3300 downloads with no pacing at all triggered DVMS anti-abuse protection
 # severe enough to temporarily block the login endpoint itself. This value

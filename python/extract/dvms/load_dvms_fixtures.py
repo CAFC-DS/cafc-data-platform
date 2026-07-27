@@ -269,7 +269,24 @@ def _asset_rows(session, competition_id: str, fixture: dict, run_id: int, loaded
     return rows
 
 
-def run(triggered_by: str, competition_id: str, season: str, download_assets: bool = True) -> int:
+def _last_n_team_fixtures(session, competition_id: str, season: str, opta_team_id: str, n: int) -> list[dict]:
+    """A team's most recent N *played* fixtures (has a recorded score),
+    most-recent-first by date. Used for a targeted pull (--team-id/--last-n)
+    instead of the full competition+season backfill."""
+    fixtures = dvms_client.get_team_fixtures(session, competition_id, season, opta_team_id)
+    played = [f for f in fixtures if f.get("homeScore") not in (None, "") and f.get("awayScore") not in (None, "")]
+    played.sort(key=lambda f: f.get("date") or "", reverse=True)
+    return played[:n]
+
+
+def run(
+    triggered_by: str,
+    competition_id: str,
+    season: str,
+    download_assets: bool = True,
+    team_id: str | None = None,
+    last_n: int | None = None,
+) -> int:
     # One session for the whole run. Do NOT re-authenticate mid-run: testing
     # on 2026-07-17 showed extra authenticate() calls under load are what
     # escalated ordinary 403s into the login endpoint itself getting
@@ -288,8 +305,12 @@ def run(triggered_by: str, competition_id: str, season: str, download_assets: bo
 
         fixture_state, done_asset_ids = _load_known_state(conn, config.SNOWFLAKE_SCHEMA)
 
-        all_fixtures = _collect_all_fixtures(session, competition_id, season)
-        log.info("Total unique fixtures for competition=%s season=%s: %d", competition_id, season, len(all_fixtures))
+        if team_id and last_n:
+            all_fixtures = _last_n_team_fixtures(session, competition_id, season, team_id, last_n)
+            log.info("Scoped to team=%s, last %d played fixture(s): %d found.", team_id, last_n, len(all_fixtures))
+        else:
+            all_fixtures = _collect_all_fixtures(session, competition_id, season)
+            log.info("Total unique fixtures for competition=%s season=%s: %d", competition_id, season, len(all_fixtures))
 
         if not all_fixtures:
             status, notes = "FAILED", "0 fixtures returned — check competition_id/season/credentials."
@@ -370,6 +391,10 @@ def _build_argparser() -> argparse.ArgumentParser:
                     help="DVMS season key, e.g. 2025 for the 2025-26 season.")
     p.add_argument("--skip-asset-download", action="store_true",
                     help="Land asset metadata only, skip downloading content (faster).")
+    p.add_argument("--team-id", default=None,
+                    help="Opta team id, e.g. t33 for Charlton Athletic. Combine with --last-n-games for a targeted pull instead of the full competition backfill.")
+    p.add_argument("--last-n-games", type=int, default=None,
+                    help="With --team-id: only that team's most recent N played fixtures.")
     return p
 
 
@@ -381,6 +406,8 @@ def main() -> None:
         competition_id=args.competition_id,
         season=args.season,
         download_assets=not args.skip_asset_download,
+        team_id=args.team_id,
+        last_n=args.last_n_games,
     )
 
 
