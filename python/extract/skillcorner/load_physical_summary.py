@@ -26,6 +26,7 @@ import re
 import sys
 
 import pandas as pd
+import requests
 from snowflake.connector.pandas_tools import write_pandas
 
 import config
@@ -81,7 +82,21 @@ def _already_loaded_match_ids(cur) -> set:
 
 
 def fetch_physical_for_match(match_id: int, run_id: int) -> list[dict]:
-    rows = api.get_match_physical(match_id)
+    """
+    Returns [] for a match with no physical data available. Confirmed live
+    (2026-07-28 backfill run) that SkillCorner returns a plain 404 for
+    matches it has no physical data for -- crashed the whole backfill the
+    first time this loader hit one, 413/3005 matches in. Treated the same
+    way Impect's "no event data" 400 is handled: skip and move on, don't
+    let one unavailable match take down an unattended run.
+    """
+    try:
+        rows = api.get_match_physical(match_id)
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            print(f"  match {match_id}: no physical data available (404), skipping")
+            return []
+        raise
     if not rows:
         return []
     cleaned = []
