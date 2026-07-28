@@ -1,0 +1,49 @@
+name: DVMS positional tracking backfill
+
+# One-off/manual backfill of the raw Second Spectrum positional tracking
+# feed (~420-470MB/match JSONL) into CAFC_DB.DVMS_RAW.POSITIONAL_STAGE.
+# Separate from the weekly DVMS pull (dvms-weekly.yml) because these files
+# are ~30-50x bigger than everything else this pipeline handles and take
+# much longer per item -- see load_dvms_positional.py's module docstring.
+#
+# Idempotent: an asset already marked STAGED_AT is skipped, so a re-run
+# after a timeout just resumes where it left off. No --limit passed here on
+# purpose (process everything still pending); re-trigger manually if this
+# run hits the timeout before finishing.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  dvms-positional-pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Write Snowflake private key
+        env:
+          SNOWFLAKE_PRIVATE_KEY_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$SNOWFLAKE_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/snowflake_key.pem"
+          chmod 600 "$RUNNER_TEMP/snowflake_key.pem"
+
+      - name: Run DVMS positional backfill
+        env:
+          DVMS_USERNAME: ${{ secrets.DVMS_USERNAME }}
+          DVMS_PASSWORD: ${{ secrets.DVMS_PASSWORD }}
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_DATABASE: CAFC_DB
+        run: |
+          export SNOWFLAKE_PRIVATE_KEY_PATH="$RUNNER_TEMP/snowflake_key.pem"
+          python -m python.extract.dvms.load_dvms_positional
