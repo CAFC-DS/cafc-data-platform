@@ -1,0 +1,99 @@
+version: 2
+
+# ============================================================================
+# DVMS_RAW source tables.
+#
+# Raw ingestion only (see docs/architecture-review-2026-06.md §6 and the
+# DVMS_RAW DDL header in snowflake/ddl/20260716_create_dvms_raw_schema.sql).
+# Originally built as OPTA_RAW, renamed before any data landed once the real
+# DVMS API showed it bundles multiple providers per fixture (Opta events,
+# Second Spectrum tracking, video) rather than being Opta-only.
+#
+# Two tables mirror the real API's two-level shape: FIXTURES (one row per
+# fixture, verbatim RAW_PAYLOAD + typed columns) and ASSETS (one row per
+# (fixture, asset), normalized from FIXTURES' nested assets array). ASSETS
+# rows are metadata-only today (type/subtype/key/ready/size) — actual file
+# content download is a follow-up, not yet built.
+#
+# No stg_dvms__*.sql views exist yet, deliberately: per the architecture
+# doc, don't force a unified model before asset *content* has actually been
+# pulled and inspected. Once python/extract/dvms/ downloads real payloads,
+# split by ASSET_SUBTYPE into typed staging views (Opta F7/F24 need XML
+# parsing, Second Spectrum spans JSON/JSONL/XML/CSV depending on sub-feed —
+# not a uniform TRY_PARSE_JSON like the IMPECT convention).
+# ============================================================================
+
+sources:
+  - name: dvms
+    description: "Raw data landed verbatim from the Premier League DVMS portal (dvms.premierleague.com) by python/extract/dvms/."
+    database: CAFC_DB
+    schema: DVMS_RAW
+
+    tables:
+      - name: FIXTURES
+        description: "One row per fixture per extractor run (append-only). RAW_PAYLOAD is the verbatim source JSON including its nested assets array."
+        config:
+          freshness:
+            warn_after: { count: 7, period: day }
+            error_after: { count: 14, period: day }
+          loaded_at_field: LOADED_AT
+        columns:
+          - name: FIXTURE_ID
+            description: "Hudl fixture id."
+            tests: [not_null]
+          - name: COMPETITION_ID
+            description: "Hudl competition id requested (not necessarily the same as any competition-shaped field in the source payload)."
+          - name: SEASON
+            description: "DVMS season key requested, e.g. 2025 for the 2025-26 season."
+          - name: OPTA_MATCH_ID
+            description: "Opta match id, e.g. g2634377. The eventual join key once identity resolution exists."
+          - name: OPTA_HOME_TEAM_ID
+          - name: OPTA_AWAY_TEAM_ID
+          - name: HOME_TEAM_NAME
+          - name: AWAY_TEAM_NAME
+          - name: MATCH_DATE
+            description: "Kickoff date/time (UTC)."
+          - name: ROUND
+          - name: HOME_SCORE
+          - name: AWAY_SCORE
+          - name: VENUE_ID
+          - name: VENUE_NAME
+          - name: NUM_ASSETS_AVAILABLE
+          - name: RAW_PAYLOAD
+            description: "Verbatim fixture JSON from the API, including its nested assets array."
+          - name: LOADED_AT
+          - name: INGESTION_RUN_ID
+
+      - name: ASSETS
+        description: "One row per (fixture, asset) per extractor run (append-only). Metadata-only today — RAW_PAYLOAD/SOURCE_URL are always NULL until asset content download is built."
+        config:
+          freshness:
+            warn_after: { count: 7, period: day }
+            error_after: { count: 14, period: day }
+          loaded_at_field: LOADED_AT
+        columns:
+          - name: FIXTURE_ID
+            description: "FK to FIXTURES.FIXTURE_ID."
+            tests:
+              - relationships:
+                  arguments:
+                    to: source('dvms', 'FIXTURES')
+                    field: FIXTURE_ID
+          - name: ASSET_ID
+            tests: [not_null]
+          - name: ASSET_TYPE
+            description: "DVMS DataType enum code (0=Video, 2=Opta, 5=SecondSpectrum, etc. — see dvms.premierleague.com/dvms/api-docs)."
+          - name: ASSET_SUBTYPE
+            description: "DVMS DataSubType enum code (20=OptaF24, 21=OptaF7, 38=SecondSpectrumDataJSON(L), etc.)."
+          - name: ASSET_KEY
+            description: "DVMS storage key/path encoding season/opta match id/provider/filename."
+          - name: READY
+            description: "Whether DVMS reports this asset as downloadable. Observed all-FALSE across the full 2025-26 Championship pull on 2026-07-17 despite the web UI showing working downloads for at least one match — open question, not yet resolved."
+          - name: SIZE_BYTES
+          - name: FILENAME
+          - name: SOURCE_URL
+            description: "Always NULL today — content download not yet built."
+          - name: RAW_PAYLOAD
+            description: "Always NULL today — content download not yet built."
+          - name: LOADED_AT
+          - name: INGESTION_RUN_ID

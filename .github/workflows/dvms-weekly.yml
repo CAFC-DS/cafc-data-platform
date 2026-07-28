@@ -1,0 +1,53 @@
+name: DVMS weekly pull
+
+# Pulls Championship fixtures + asset content (event data, metadata, physical
+# stats) from the Hudl DVMS API into CAFC_DB.DVMS_RAW. Runs on GitHub's
+# infrastructure rather than a local schedule because the source machine
+# isn't reliably on/awake.
+#
+# Repeat runs are cheap by design: load_dvms_fixtures.py skips fixtures and
+# assets already captured (see its module docstring / _load_known_state),
+# so a weekly run mostly just picks up newly-played matches.
+#
+# Does NOT touch the raw positional tracking feeds (Second Spectrum Data
+# JSON/XML, ~420MB/match) — those are intentionally out of scope pending a
+# separate Snowflake-internal-stage build.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Monday 06:00 UTC
+  workflow_dispatch: {} # manual trigger from the Actions tab
+
+jobs:
+  dvms-pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Write Snowflake private key
+        env:
+          SNOWFLAKE_PRIVATE_KEY_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$SNOWFLAKE_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/snowflake_key.pem"
+          chmod 600 "$RUNNER_TEMP/snowflake_key.pem"
+
+      - name: Run DVMS extractor
+        env:
+          DVMS_USERNAME: ${{ secrets.DVMS_USERNAME }}
+          DVMS_PASSWORD: ${{ secrets.DVMS_PASSWORD }}
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_DATABASE: CAFC_DB
+        run: |
+          export SNOWFLAKE_PRIVATE_KEY_PATH="$RUNNER_TEMP/snowflake_key.pem"
+          python -m python.extract.dvms.load_dvms_fixtures --triggered-by github-actions

@@ -1,0 +1,56 @@
+name: SkillCorner physical data backfill
+
+# One-off/manual backfill of per-player physical summary data
+# (CAFC_DB.SKILLCORNER_RAW.PHYSICAL_SUMMARY) across every competition
+# edition this account actually has match data for -- confirmed live
+# (2026-07-27) that's 7 editions across 6 competitions, 3,005 matches,
+# tracking Charlton's actual competition history (League One 24/25,
+# Championship 24/25-25/26) plus partial coverage of a few other leagues.
+# See load_physical_summary.py / skillcorner_api.py for how auth and the
+# real endpoints were reverse-engineered (the public docs are behind a
+# login wall).
+#
+# Idempotent: matches already present are skipped, so a re-run after a
+# timeout just resumes. No prior rate-limit incidents are known for this
+# API, but it's also never been hit at this volume -- if this run starts
+# failing partway through, stop and investigate before just re-triggering.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  skillcorner-pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    defaults:
+      run:
+        working-directory: python/extract/skillcorner
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        working-directory: .
+        run: pip install -e .
+
+      - name: Write Snowflake private key
+        env:
+          SNOWFLAKE_PRIVATE_KEY_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$SNOWFLAKE_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/snowflake_key.pem"
+          chmod 600 "$RUNNER_TEMP/snowflake_key.pem"
+
+      - name: Run SkillCorner backfill
+        env:
+          SKILLCORNER_API_KEY: ${{ secrets.SKILLCORNER_API_KEY }}
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_DATABASE: CAFC_DB
+        run: |
+          export SNOWFLAKE_PRIVATE_KEY_PATH="$RUNNER_TEMP/snowflake_key.pem"
+          python load_physical_summary.py --all-available
