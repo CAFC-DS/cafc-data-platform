@@ -22,7 +22,11 @@ on:
 jobs:
   impect-events-pull:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    # 300 min wasn't enough for a full 557-match iteration in the first live
+    # run (confirmed 2026-07-28) -- bumped close to GitHub's 360min hard cap
+    # per job. Idempotent either way; a run that still times out just needs
+    # re-triggering to resume from where it left off.
+    timeout-minutes: 355
     defaults:
       run:
         working-directory: python/extract/impect
