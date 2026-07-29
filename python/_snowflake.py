@@ -71,4 +71,11 @@ def get_connection(
         schema=schema       or os.getenv("SNOWFLAKE_SCHEMA", "CORE"),
         ocsp_fail_open=True,
         insecure_mode=True,
+        # Confirmed live (2026-07-29): a single connection held open for a
+        # ~5-hour SkillCorner backfill died with "Authentication token has
+        # expired" right at the very end (2995/3005 matches already loaded)
+        # -- Snowflake's session token isn't renewed by default on a
+        # long-lived connection. This makes the connector send periodic
+        # heartbeats so multi-hour backfill runs survive to completion.
+        client_session_keep_alive=True,
     )
