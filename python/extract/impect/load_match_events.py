@@ -129,7 +129,59 @@ def _to_json(value):
     return json.dumps(value, default=str)
 
 
-def fetch_events_for_match(match_id: int, iteration_id, run_id: int) -> list[dict]:
+_kpi_dictionary_cache: dict = {}
+
+
+def get_kpi_dictionary() -> dict:
+    """
+    {kpiId: name} for all event-level KPIs (GET /kpis/event), e.g.
+    {1406: "SHOT_XG", ...}. 103 rows, effectively static -- fetched once per
+    process and cached, not once per match.
+    """
+    if not _kpi_dictionary_cache:
+        resp = api.get_event_kpi_dictionary()
+        data = resp.get("data", resp) if isinstance(resp, dict) else resp
+        _kpi_dictionary_cache.update({row["id"]: row["name"] for row in data})
+    return _kpi_dictionary_cache
+
+
+def fetch_event_kpis_grouped(match_id: int) -> dict:
+    """
+    {eventId: [{"position": ..., "playerId": ..., "<kpiName>": value, ...}, ...]}
+
+    Confirmed live: ~10 scoring rows per event (the primary player plus other
+    on-pitch players' attribution for the same event, e.g. every outfield
+    player gets a DEF_PXT_SHOT row for one shot). Grouped as a list per event
+    rather than collapsed to one dict, since collapsing would silently drop
+    all but one player's rows.
+    """
+    try:
+        resp = api.get_match_event_kpis(match_id)
+    except Exception as e:
+        if "does not have packing plus data" in str(e) or "400 error" in str(e):
+            return {}
+        raise
+    rows = resp.get("data", resp) if isinstance(resp, dict) else resp
+    if not rows:
+        return {}
+
+    id_to_name = get_kpi_dictionary()
+    grouped: dict = {}
+    # Rows are one-KPI-per-row for a given (eventId, position, playerId);
+    # collapse to one entry per (eventId, position, playerId) with every KPI
+    # as a key, matching impectPy's pivot semantics.
+    entries: dict = {}
+    for r in rows:
+        key = (r["eventId"], r.get("position"), r.get("playerId"))
+        entry = entries.setdefault(key, {"position": r.get("position"), "playerId": r.get("playerId")})
+        name = id_to_name.get(r["kpiId"], f"kpi_{r['kpiId']}")
+        entry[name] = r["value"]
+    for (event_id, _pos, _pid), entry in entries.items():
+        grouped.setdefault(event_id, []).append(entry)
+    return grouped
+
+
+def fetch_events_for_match(match_id: int, iteration_id, run_id: int, include_kpis: bool = True) -> list[dict]:
     """
     Returns a list of flattened event rows for one match, or [] if the match
     has no event data (confirmed 400 case -- see module docstring). Any other
@@ -146,10 +198,17 @@ def fetch_events_for_match(match_id: int, iteration_id, run_id: int) -> list[dic
     events = response.get("data", response) if isinstance(response, dict) else response
     if not events:
         return []
-    return [_flatten_event(match_id, iteration_id, ev, run_id) for ev in events]
+
+    kpis_by_event = fetch_event_kpis_grouped(match_id) if include_kpis else {}
+    rows = []
+    for ev in events:
+        row = _flatten_event(match_id, iteration_id, ev, run_id)
+        row["EVENT_KPIS"] = _to_json(kpis_by_event.get(ev.get("id")))
+        rows.append(row)
+    return rows
 
 
-_VARIANT_COLUMNS = list(_VARIANT_FIELDS.values()) + ["RAW_EVENT"]
+_VARIANT_COLUMNS = list(_VARIANT_FIELDS.values()) + ["RAW_EVENT", "EVENT_KPIS"]
 
 
 def load_events(rows: list[dict]) -> int:
@@ -189,6 +248,74 @@ def load_events(rows: list[dict]) -> int:
                 )
         conn.commit()
         return num_rows
+    finally:
+        conn.close()
+
+
+def backfill_kpis(match_ids: list[int]) -> dict:
+    """
+    Attach EVENT_KPIS to events already sitting in IMPECT_RAW.EVENTS, without
+    re-inserting or re-fetching event rows. Uses a session-scoped TEMPORARY
+    table + MERGE rather than a Python-side UPDATE per event -- at 1.5M+
+    events across 557 matches, a per-row UPDATE would be prohibitively slow.
+    """
+    conn = get_connection()
+    try:
+        stage_table = f"{config.SNOWFLAKE_SCHEMA}.EVENT_KPIS_STAGE"
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                CREATE TEMPORARY TABLE IF NOT EXISTS {stage_table} (
+                    MATCH_ID NUMBER, EVENT_ID NUMBER, EVENT_KPIS_JSON VARCHAR
+                )
+            """)
+
+        matches_updated = 0
+        events_updated_total = 0
+        matches_no_data = 0
+
+        for match_id in match_ids:
+            kpis_by_event = fetch_event_kpis_grouped(match_id)
+            if not kpis_by_event:
+                matches_no_data += 1
+                print(f"  match {match_id}: no event-kpi data available, skipping")
+                continue
+
+            rows = [
+                {"MATCH_ID": match_id, "EVENT_ID": event_id, "EVENT_KPIS_JSON": _to_json(entries)}
+                for event_id, entries in kpis_by_event.items()
+            ]
+            df = pd.DataFrame(rows)
+
+            with conn.cursor() as cur:
+                cur.execute(f"TRUNCATE TABLE {stage_table}")
+            success, _, n, _ = write_pandas(
+                conn=conn, df=df, table_name="EVENT_KPIS_STAGE",
+                database=config.SNOWFLAKE_DATABASE, schema=config.SNOWFLAKE_SCHEMA,
+                overwrite=False, auto_create_table=False,
+            )
+            if not success:
+                raise RuntimeError(f"write_pandas reported failure staging KPIs for match {match_id}")
+
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    MERGE INTO {config.SNOWFLAKE_DATABASE}.{config.SNOWFLAKE_SCHEMA}.{TABLE_NAME} t
+                    USING {config.SNOWFLAKE_DATABASE}.{stage_table} s
+                       ON t.MATCH_ID = s.MATCH_ID AND t.EVENT_ID = s.EVENT_ID
+                    WHEN MATCHED THEN UPDATE SET t.EVENT_KPIS = PARSE_JSON(s.EVENT_KPIS_JSON)
+                """)
+            conn.commit()
+
+            matches_updated += 1
+            events_updated_total += n
+            print(f"  match {match_id}: attached KPIs to {n} events")
+
+        summary = {
+            "matches_updated": matches_updated,
+            "events_updated": events_updated_total,
+            "matches_no_data": matches_no_data,
+        }
+        print(f"Done: {summary}")
+        return summary
     finally:
         conn.close()
 
@@ -254,6 +381,15 @@ def run(iteration_id: int = None, match_ids: list[int] = None, force: bool = Fal
         conn.close()
 
 
+def _all_loaded_match_ids() -> list[int]:
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            return sorted(_already_loaded_match_ids(cur))
+    finally:
+        conn.close()
+
+
 def _parse_args():
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--iteration-id", type=int, default=None,
@@ -262,6 +398,9 @@ def _parse_args():
                    help="Comma-separated Impect match ids to pull directly (test/backfill-slice mode).")
     p.add_argument("--force", action="store_true",
                    help="Re-fetch and re-insert matches even if already present in IMPECT_RAW.EVENTS.")
+    p.add_argument("--backfill-kpis", action="store_true",
+                   help="Attach EVENT_KPIS to matches already loaded, without re-inserting events. "
+                        "Combine with --match-ids to scope it, or omit to backfill every loaded match.")
     return p.parse_args()
 
 
@@ -269,6 +408,9 @@ if __name__ == "__main__":
     args = _parse_args()
     match_ids = [int(x) for x in args.match_ids.split(",")] if args.match_ids else None
     try:
+        if args.backfill_kpis:
+            backfill_kpis(match_ids or _all_loaded_match_ids())
+            sys.exit(0)
         run(iteration_id=args.iteration_id, match_ids=match_ids, force=args.force)
     except KeyboardInterrupt:
         print("\nInterrupted.")

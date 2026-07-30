@@ -307,6 +307,43 @@ def get_match_events(match_id: int, params: Optional[Dict] = None) -> Dict[str, 
     return make_request(f"/v5/customerapi/matches/{match_id}/events", params)
 
 
+def get_match_event_kpis(match_id: int, params: Optional[Dict] = None) -> Dict[str, Any]:
+    """
+    Get stand-alone KPIs computed at event level (GET /matches/{id}/event-kpis).
+
+    Confirmed live: this is a *separate* endpoint from get_match_events, not
+    a field on the event itself -- it returns long-format rows
+    {eventId, position, playerId, kpiId, value}, roughly 10 rows per event
+    (multiple players/positions get a KPI attributed to the same event, e.g.
+    a shooter's SHOT_XG alongside every outfield player's DEF_PXT_SHOT for
+    that same shot). kpiId needs get_event_kpi_dictionary() to resolve to a
+    name (e.g. SHOT_XG, PACKING_XG) -- this is where event-level xG lives;
+    it is NOT present on the plain /events payload at all.
+
+    Args:
+        match_id: Match ID
+        params: Optional query parameters
+
+    Returns:
+        Scoring rows under "data".
+    """
+    return make_request(f"/v5/customerapi/matches/{match_id}/event-kpis", params)
+
+
+def get_event_kpi_dictionary(params: Optional[Dict] = None) -> Dict[str, Any]:
+    """
+    Get the full list of event-level KPI definitions (GET /kpis/event).
+
+    Confirmed live: 103 KPIs, id->name (e.g. {"id": 1406, "name": "SHOT_XG"}).
+    Small and effectively static -- fetch once per run/process, don't refetch
+    per match.
+
+    Returns:
+        KPI definitions under "data".
+    """
+    return make_request("/v5/customerapi/kpis/event", params)
+
+
 def get_match_squad_kpis(match_id: int, params: Optional[Dict] = None) -> Dict[str, Any]:
     """
     Get squad KPI data for a specific match

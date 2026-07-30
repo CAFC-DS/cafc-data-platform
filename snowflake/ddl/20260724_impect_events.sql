@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS CAFC_DB.IMPECT_RAW.EVENTS (
   PXT_DETAIL            VARIANT  COMMENT 'Nested "pxT" object: {team, opponent} -- Impect''s possession-value-added metric for this event.',
   FORMATION_DETAIL      VARIANT  COMMENT 'Nested "formation" object: {team, opponent} formation strings at the time of the event.',
   OPPONENT_DETAIL       VARIANT  COMMENT 'Nested "opponent" object: nearest-opponent coordinates at the event''s start.',
+  EVENT_KPIS            VARIANT  COMMENT 'Array of {position, playerId, <kpiName>: value, ...} objects from GET /matches/{id}/event-kpis (a SEPARATE endpoint from the plain event payload, resolved against GET /kpis/event for kpiId->name). This is where event-level xG lives (SHOT_XG, PACKING_XG, POSTSHOT_XG) plus the full PXT_* family -- confirmed live 2026-07-30 that none of this exists on the base event JSON at all. One event typically has ~10 rows here (the primary player plus every other on-pitch player''s defensive/positional attribution for that same event), so this is an array, not a flat object -- filter by playerId to get one player''s view.',
   RAW_EVENT             VARIANT  NOT NULL  COMMENT 'Full verbatim event JSON as returned by the API -- the replay buffer, in case a future field is needed that wasn''t worth a dedicated column at onboarding time.',
   LOADED_AT             TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()  COMMENT 'When this row was landed.',
   INGESTION_RUN_ID       NUMBER(38,0)  COMMENT 'FK to CORE.INGESTION_RUNS for the extractor run that landed this row.'
