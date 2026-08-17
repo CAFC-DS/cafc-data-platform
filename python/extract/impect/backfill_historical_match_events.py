@@ -25,6 +25,7 @@ from snowflake.connector.pandas_tools import write_pandas
 import config
 import impect_api as api
 import load_match_events as events
+import refresh_iteration_metadata as metadata
 from snowflake_loader import get_connection
 
 
@@ -235,6 +236,7 @@ def discover(iteration_batch_size: int, iteration_ids: set[int] | None = None, r
     failures = 0
     for item in claimed:
         try:
+            metadata.refresh({item["id"]})
             matches = _records(api.get_matches(item["id"]))
             for match in matches:
                 scheduled_at = _as_utc(match.get("scheduledDate"))
