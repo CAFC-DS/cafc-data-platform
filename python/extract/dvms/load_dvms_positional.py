@@ -43,13 +43,18 @@ STAGE = "@CAFC_DB.DVMS_RAW.POSITIONAL_STAGE"
 POSITIONAL_SUBTYPE = 38  # SecondSpectrumDataJSON(L) — see DVMS API docs DataSubType enum
 
 
-def _pending_assets(conn, limit: int | None, fixture_id: str | None) -> list[tuple[str, str, str]]:
+def _pending_assets(conn, limit: int | None, fixture_ids: str | None) -> list[tuple[str, str, str]]:
     """(fixture_id, asset_id, asset_key) for positional assets not yet staged."""
     where = ["ASSET_SUBTYPE = %(subtype)s", "STAGED_AT IS NULL"]
     params = {"subtype": POSITIONAL_SUBTYPE}
-    if fixture_id:
-        where.append("FIXTURE_ID = %(fid)s")
-        params["fid"] = fixture_id
+    if fixture_ids:
+        values = [value.strip() for value in fixture_ids.split(",") if value.strip()]
+        placeholders = []
+        for index, fixture_id in enumerate(values):
+            key = f"fid_{index}"
+            placeholders.append(f"%({key})s")
+            params[key] = fixture_id
+        where.append(f"FIXTURE_ID IN ({', '.join(placeholders)})")
 
     sql = f"""
         SELECT FIXTURE_ID, ASSET_ID, ASSET_KEY
@@ -114,10 +119,10 @@ def _stage_one(conn, session, competition_id: str, fixture_id: str, asset_id: st
         return True
 
 
-def run(competition_id: str, limit: int | None, fixture_id: str | None) -> dict:
+def run(competition_id: str, limit: int | None, fixture_ids: str | None) -> dict:
     conn = _snowflake.get_connection(schema=config.SNOWFLAKE_SCHEMA)
     try:
-        pending = _pending_assets(conn, limit, fixture_id)
+        pending = _pending_assets(conn, limit, fixture_ids)
         log.info("%d positional asset(s) pending staging.", len(pending))
         if not pending:
             return {"staged": 0, "failed": 0}
@@ -147,14 +152,15 @@ def _build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Stage raw DVMS positional tracking files (~420MB/match) to Snowflake.")
     p.add_argument("--competition-id", default=config.DVMS_COMPETITION_ID)
     p.add_argument("--limit", type=int, default=None, help="Max number of files to stage this run.")
-    p.add_argument("--fixture-id", default=None, help="Stage only this fixture's positional file.")
+    p.add_argument("--fixture-id", default=None,
+                   help="Stage one or more comma-separated fixture IDs only.")
     return p
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = _build_argparser().parse_args()
-    run(competition_id=args.competition_id, limit=args.limit, fixture_id=args.fixture_id)
+    run(competition_id=args.competition_id, limit=args.limit, fixture_ids=args.fixture_id)
 
 
 if __name__ == "__main__":

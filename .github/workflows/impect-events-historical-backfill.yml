@@ -1,0 +1,73 @@
+name: IMPECT historical men's events backfill
+
+# Manual by design: this is a finite, one-off historical load. Start with
+# `discover`, then re-run `process` until `status` has no PENDING/RUNNING/
+# FAILED rows. Batches are small and resumable to control runner/API cost.
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "discover queues all historic men’s matches; process loads one resumable batch; status reports progress"
+        required: true
+        default: "process"
+        type: choice
+        options: [discover, process, status]
+      batch_size:
+        description: "Matches to process in this run (default: 25)"
+        required: false
+        default: "25"
+      iteration_batch_size:
+        description: "Iterations to catalogue for a discover run (default: 25)"
+        required: false
+        default: "25"
+      iteration_ids:
+        description: "Optional comma-separated IMPECT iteration IDs; only applies to discover"
+        required: false
+        default: ""
+
+concurrency:
+  group: impect-events
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: python/extract/impect
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        working-directory: .
+        run: pip install -e .
+
+      - name: Write Snowflake private key
+        env:
+          SNOWFLAKE_PRIVATE_KEY_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$SNOWFLAKE_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/snowflake_key.pem"
+          chmod 600 "$RUNNER_TEMP/snowflake_key.pem"
+
+      - name: Run selected backfill action
+        env:
+          IMPECT_USERNAME: ${{ secrets.IMPECT_USERNAME }}
+          IMPECT_PASSWORD: ${{ secrets.IMPECT_PASSWORD }}
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_DATABASE: CAFC_DB
+        run: |
+          export SNOWFLAKE_PRIVATE_KEY_PATH="$RUNNER_TEMP/snowflake_key.pem"
+          case "${{ inputs.action }}" in
+            discover) python backfill_historical_match_events.py --discover --iteration-batch-size "${{ inputs.iteration_batch_size }}" --iteration-ids "${{ inputs.iteration_ids }}" ;;
+            process) python backfill_historical_match_events.py --process --batch-size "${{ inputs.batch_size }}" --iteration-ids "${{ inputs.iteration_ids }}" ;;
+            status) python backfill_historical_match_events.py --status ;;
+          esac

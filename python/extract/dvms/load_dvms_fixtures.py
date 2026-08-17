@@ -269,14 +269,28 @@ def _asset_rows(session, competition_id: str, fixture: dict, run_id: int, loaded
     return rows
 
 
-def _last_n_team_fixtures(session, competition_id: str, season: str, opta_team_id: str, n: int) -> list[dict]:
-    """A team's most recent N *played* fixtures (has a recorded score),
-    most-recent-first by date. Used for a targeted pull (--team-id/--last-n)
-    instead of the full competition+season backfill."""
-    fixtures = dvms_client.get_team_fixtures(session, competition_id, season, opta_team_id)
-    played = [f for f in fixtures if f.get("homeScore") not in (None, "") and f.get("awayScore") not in (None, "")]
-    played.sort(key=lambda f: f.get("date") or "", reverse=True)
-    return played[:n]
+def _last_n_team_fixtures(session, competition_id: str, season: str, opta_team_ids: str, n: int) -> list[dict]:
+    """Most recent N played fixtures for one or more comma-separated teams.
+
+    DVMS's competition-wide endpoint can temporarily return an empty result for
+    a newly started season. Its per-team endpoint remains available, so a
+    comma-separated list lets a single authenticated run recover a whole round
+    without repeatedly authenticating or duplicating shared fixtures.
+    """
+    fixtures_by_id: dict[str, dict] = {}
+    for opta_team_id in (value.strip() for value in opta_team_ids.split(",")):
+        if not opta_team_id:
+            continue
+        fixtures = dvms_client.get_team_fixtures(session, competition_id, season, opta_team_id)
+        played = [f for f in fixtures if f.get("homeScore") not in (None, "") and f.get("awayScore") not in (None, "")]
+        played.sort(key=lambda f: f.get("date") or "", reverse=True)
+        for fixture in played[:n]:
+            fixture_id = fixture.get("fixtureId")
+            if fixture_id:
+                fixtures_by_id[fixture_id] = fixture
+        log.info("Team %s -> %d most-recent played fixture(s).", opta_team_id, min(len(played), n))
+        time.sleep(config.DOWNLOAD_DELAY_SECONDS)
+    return list(fixtures_by_id.values())
 
 
 def run(
@@ -392,7 +406,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--skip-asset-download", action="store_true",
                     help="Land asset metadata only, skip downloading content (faster).")
     p.add_argument("--team-id", default=None,
-                    help="Opta team id, e.g. t33 for Charlton Athletic. Combine with --last-n-games for a targeted pull instead of the full competition backfill.")
+                    help="One or more comma-separated Opta team ids, e.g. t33 or t33,t24. Combine with --last-n-games for a targeted pull instead of the full competition backfill.")
     p.add_argument("--last-n-games", type=int, default=None,
                     help="With --team-id: only that team's most recent N played fixtures.")
     return p

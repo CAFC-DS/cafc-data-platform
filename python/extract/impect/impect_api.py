@@ -258,6 +258,26 @@ def get_matches(iteration_id: int, params: Optional[Dict] = None) -> Dict[str, A
     return make_request(f"/v5/customerapi/iterations/{iteration_id}/matches", params)
 
 
+def get_match_updates(since: str) -> Dict[str, Any]:
+    """Return changed match metadata from IMPECT's V5 update feed."""
+    return make_request("/v5/customerapi/update/matches", {"since": since})
+
+
+def get_match_data_updates(since: str) -> Dict[str, Any]:
+    """Return matches whose event/KPI data changed since ``since``.
+
+    This is the incremental trigger for event ingestion.  Its compact rows
+    contain ``id`` and the provider update timestamp; callers fetch the
+    complete match event payload only for these ids.
+    """
+    return make_request("/v5/customerapi/update/matchdata", {"since": since})
+
+
+def get_match_deletes(since: str) -> Dict[str, Any]:
+    """Return deleted or merged match ids from IMPECT's V5 delete feed."""
+    return make_request("/v5/customerapi/delete/matches", {"since": since})
+
+
 def get_match_info(match_id: int, params: Optional[Dict] = None) -> Dict[str, Any]:
     """
     Get detailed metadata for a specific match
