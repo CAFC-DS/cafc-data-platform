@@ -3,6 +3,7 @@ Simple procedural functions to load data into Snowflake
 """
 import snowflake.connector
 import pandas as pd
+from pathlib import Path
 from snowflake.connector.pandas_tools import write_pandas
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 import config
@@ -15,7 +16,14 @@ def get_connection():
     Returns:
         Snowflake connection object
     """
-    with open(config.SNOWFLAKE_PRIVATE_KEY_PATH, 'rb') as key_file:
+    key_path = Path(config.SNOWFLAKE_PRIVATE_KEY_PATH)
+    if not key_path.is_absolute():
+        # The vendored .env stores a path relative to this extractor.  Resolve
+        # it here rather than relying on the caller's working directory, which
+        # makes scheduled/local background workers behave like CLI runs.
+        key_path = Path(__file__).resolve().parent / key_path
+
+    with key_path.open('rb') as key_file:
         private_key = load_pem_private_key(key_file.read(), password=None)
 
     conn = snowflake.connector.connect(

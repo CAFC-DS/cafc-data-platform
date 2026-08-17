@@ -1,4 +1,4 @@
-name: DVMS positional tracking backfill
+name: DVMS Championship positional sync
 
 # One-off/manual backfill of the raw Second Spectrum positional tracking
 # feed (~420-470MB/match JSONL) into CAFC_DB.DVMS_RAW.POSITIONAL_STAGE.
@@ -8,34 +8,62 @@ name: DVMS positional tracking backfill
 #
 # Idempotent: an asset already marked STAGED_AT is skipped, so a re-run
 # after a timeout just resumes where it left off. No --limit passed here on
-# purpose (process everything still pending); re-trigger manually if this
-# run hits the timeout before finishing.
+# purpose (process everything still pending).
+#
+# Self-resuming: runs after the normal DVMS sync so a run that hits the 330min cap
+# gets picked back up automatically without anyone re-triggering it by
+# hand. The concurrency group + cancel-in-progress:false means a cron firing
+# while a run is still in flight just queues behind it rather than
+# duplicating work -- once every asset is staged, each firing becomes a
+# fast no-op (nothing left to skip past), so there's no need to disable
+# the schedule once this catches up.
 
 on:
   workflow_dispatch: {}
+  schedule:
+    # Both UTC hours are triggered; the first step selects 10:00 Europe/London.
+    - cron: "0 9,10 * * 0,1,3,4"
+
+concurrency:
+  group: dvms-positional-backfill
+  cancel-in-progress: false
 
 jobs:
   dvms-positional-pull:
     runs-on: ubuntu-latest
     timeout-minutes: 330
     steps:
-      - uses: actions/checkout@v4
+      - name: Check London schedule
+        id: london_time
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$(TZ=Europe/London date +%H:%M)" = "10:00" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - uses: actions/setup-python@v5
+      - if: steps.london_time.outputs.run == 'true'
+        uses: actions/checkout@v4
+
+      - if: steps.london_time.outputs.run == 'true'
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
       - name: Install dependencies
+        if: steps.london_time.outputs.run == 'true'
         run: pip install -e .
 
       - name: Write Snowflake private key
+        if: steps.london_time.outputs.run == 'true'
         env:
           SNOWFLAKE_PRIVATE_KEY_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
         run: |
           printf '%s' "$SNOWFLAKE_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/snowflake_key.pem"
           chmod 600 "$RUNNER_TEMP/snowflake_key.pem"
 
-      - name: Run DVMS positional backfill
+      - name: Run DVMS positional sync
+        if: steps.london_time.outputs.run == 'true'
         env:
           DVMS_USERNAME: ${{ secrets.DVMS_USERNAME }}
           DVMS_PASSWORD: ${{ secrets.DVMS_PASSWORD }}

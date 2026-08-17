@@ -25,9 +25,24 @@ Usage:
 
     # Re-fetch matches even if already loaded:
     python load_match_events.py --iteration-id 1410 --force
+
+    # Full historical backfill: every iteration with event-level data
+    # (DATAVERSION != 'V1' on IMPECT_RAW.ITERATIONS), looped until exhausted.
+    # Intended to run for days unattended -- one bad iteration is logged and
+    # skipped rather than killing the whole run. Split across N terminals/
+    # processes with --lane/--lanes for local parallelism (each process
+    # takes a disjoint slice of the same iteration list by iteration_id mod
+    # lanes, so lanes never duplicate work):
+    python load_match_events.py --all-iterations --lane 0 --lanes 4
+    python load_match_events.py --all-iterations --lane 1 --lanes 4
+    ...
+
+    # See what --all-iterations would process without pulling any data:
+    python load_match_events.py --all-iterations --dry-run
 """
 import argparse
 import sys
+import time
 
 import pandas as pd
 from snowflake.connector.pandas_tools import write_pandas
@@ -211,7 +226,15 @@ def fetch_events_for_match(match_id: int, iteration_id, run_id: int, include_kpi
 _VARIANT_COLUMNS = list(_VARIANT_FIELDS.values()) + ["RAW_EVENT", "EVENT_KPIS"]
 
 
-def load_events(rows: list[dict]) -> int:
+def load_events(rows: list[dict], *, replace_existing_match: bool = False) -> int:
+    """Load one match's events.
+
+    ``replace_existing_match`` makes a re-pull safe when Impect recalculates a
+    match and changes its event ids.  New rows are written first; only after
+    the write and VARIANT conversion succeed are older rows for that match
+    removed.  A failed re-pull therefore leaves the previous usable copy in
+    place rather than creating a gap in the raw landing table.
+    """
     if not rows:
         return 0
     df = pd.DataFrame(rows)
@@ -245,6 +268,16 @@ def load_events(rows: list[dict]) -> int:
                      WHERE INGESTION_RUN_ID = %(run_id)s AND {col} IS NOT NULL
                     """,
                     {"run_id": run_id},
+                )
+            if replace_existing_match:
+                match_id = int(df["MATCH_ID"].iloc[0])
+                cur.execute(
+                    f"""
+                    DELETE FROM {config.SNOWFLAKE_DATABASE}.{config.SNOWFLAKE_SCHEMA}.{TABLE_NAME}
+                     WHERE MATCH_ID = %(match_id)s
+                       AND COALESCE(INGESTION_RUN_ID, -1) != %(run_id)s
+                    """,
+                    {"match_id": match_id, "run_id": run_id},
                 )
         conn.commit()
         return num_rows
@@ -356,7 +389,7 @@ def run(iteration_id: int = None, match_ids: list[int] = None, force: bool = Fal
             if not rows:
                 matches_no_data += 1
                 continue
-            n = load_events(rows)
+            n = load_events(rows, replace_existing_match=force)
             total_events += n
             matches_loaded += 1
             print(f"  match {match_id}: loaded {n} events")
@@ -390,6 +423,52 @@ def _all_loaded_match_ids() -> list[int]:
         conn.close()
 
 
+def target_iterations(lane: int = 0, lanes: int = 1) -> list[int]:
+    """
+    Every iteration with event-level data available: DATAVERSION != 'V1' on
+    IMPECT_RAW.ITERATIONS (confirmed live 2026-08-12 -- V2/V3/V4 all carry
+    real event data, V1 doesn't; see docs/raw-event-data-usage-guide.md).
+    No gender filter -- raw lands everything, dbt staging filters women's
+    competitions downstream, per platform convention.
+
+    Sharded by `iteration_id % lanes == lane` so multiple local processes
+    can run the same target list concurrently without duplicating work.
+    Sorted ascending so re-running after a crash resumes in the same order
+    (not required for correctness -- run() re-checks already-loaded matches
+    regardless -- just keeps progress easy to reason about across restarts).
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT ID FROM CAFC_DB.IMPECT_RAW.ITERATIONS WHERE DATAVERSION != 'V1' ORDER BY ID"
+            )
+            all_ids = [row[0] for row in cur.fetchall()]
+    finally:
+        conn.close()
+    return [i for i in all_ids if i % lanes == lane]
+
+
+def run_all_iterations(iteration_ids: list[int], force: bool = False,
+                        triggered_by: str = "load_match_events.py --all-iterations") -> None:
+    """
+    Loop `run()` across every target iteration, forever resilient to a
+    single bad iteration -- this is meant to run unattended for days, so one
+    iteration raising (a genuinely new API shape, a transient Snowflake
+    blip that survived make_request's own retries, etc.) is logged and
+    skipped rather than killing every iteration queued behind it.
+    """
+    start = time.time()
+    for n, iteration_id in enumerate(iteration_ids, start=1):
+        elapsed_h = (time.time() - start) / 3600
+        print(f"\n=== iteration {iteration_id} ({n}/{len(iteration_ids)}, {elapsed_h:.1f}h elapsed) ===")
+        try:
+            run(iteration_id=iteration_id, force=force, triggered_by=triggered_by)
+        except Exception as e:
+            print(f"  iteration {iteration_id} FAILED, skipping: {e}")
+    print(f"\nAll {len(iteration_ids)} target iteration(s) attempted in {(time.time() - start) / 3600:.1f}h.")
+
+
 def _parse_args():
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--iteration-id", type=int, default=None,
@@ -401,6 +480,16 @@ def _parse_args():
     p.add_argument("--backfill-kpis", action="store_true",
                    help="Attach EVENT_KPIS to matches already loaded, without re-inserting events. "
                         "Combine with --match-ids to scope it, or omit to backfill every loaded match.")
+    p.add_argument("--all-iterations", action="store_true",
+                   help="Loop every iteration with event-level data (DATAVERSION != 'V1'), "
+                        "resilient to per-iteration failures. Intended for a long-running "
+                        "unattended process, not a single CI job.")
+    p.add_argument("--lane", type=int, default=0,
+                   help="With --all-iterations: this process's lane index (0-based).")
+    p.add_argument("--lanes", type=int, default=1,
+                   help="With --all-iterations: total number of parallel lanes.")
+    p.add_argument("--dry-run", action="store_true",
+                   help="With --all-iterations: print the target iteration list and exit.")
     return p.parse_args()
 
 
@@ -410,6 +499,13 @@ if __name__ == "__main__":
     try:
         if args.backfill_kpis:
             backfill_kpis(match_ids or _all_loaded_match_ids())
+            sys.exit(0)
+        if args.all_iterations:
+            ids = target_iterations(lane=args.lane, lanes=args.lanes)
+            print(f"Lane {args.lane}/{args.lanes}: {len(ids)} target iteration(s): {ids}")
+            if args.dry_run:
+                sys.exit(0)
+            run_all_iterations(ids, force=args.force)
             sys.exit(0)
         run(iteration_id=args.iteration_id, match_ids=match_ids, force=args.force)
     except KeyboardInterrupt:
