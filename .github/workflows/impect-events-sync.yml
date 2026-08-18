@@ -32,6 +32,7 @@ jobs:
     steps:
       - name: Check London schedule
         id: london_time
+        working-directory: .
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$(TZ=Europe/London date +%H:%M)" = "09:15" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
