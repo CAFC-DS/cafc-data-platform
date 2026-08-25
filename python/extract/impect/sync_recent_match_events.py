@@ -52,10 +52,15 @@ def _is_womens(iteration: dict) -> bool:
     return "FEMALE" in gender or "WOMEN" in gender
 
 
-def eligible_iterations(allowed_seasons: set[str]) -> dict[int, dict]:
+def eligible_iterations(
+    allowed_seasons: set[str], competition_ids: set[int] | None = None,
+) -> dict[int, dict]:
     selected = {}
     for iteration in _records(api.get_iterations()):
         if _is_womens(iteration):
+            continue
+        competition_id = int(_nested(iteration, "competition.id") or 0)
+        if competition_ids is not None and competition_id not in competition_ids:
             continue
         if str(iteration.get("season") or "").strip() in allowed_seasons:
             selected[int(iteration["id"])] = iteration
@@ -88,18 +93,28 @@ def load_known_state() -> dict[int, dict]:
         conn.close()
 
 
-def load_since(default_since: datetime) -> datetime:
+def load_event_match_ids() -> set[int]:
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT LAST_SUCCESSFUL_SINCE FROM {CURSOR_TABLE} WHERE FEED_NAME = %(feed)s", {"feed": FEED_NAME})
+            cur.execute("SELECT DISTINCT MATCH_ID FROM CAFC_DB.IMPECT_RAW.EVENTS")
+            return {int(row[0]) for row in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def load_since(default_since: datetime, feed_name: str = FEED_NAME) -> datetime:
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT LAST_SUCCESSFUL_SINCE FROM {CURSOR_TABLE} WHERE FEED_NAME = %(feed)s", {"feed": feed_name})
             row = cur.fetchone()
             return _as_utc(row[0]) if row else default_since
     finally:
         conn.close()
 
 
-def save_since(value: datetime) -> None:
+def save_since(value: datetime, feed_name: str = FEED_NAME) -> None:
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -111,7 +126,7 @@ def save_since(value: datetime) -> None:
                 WHEN MATCHED THEN UPDATE SET LAST_SUCCESSFUL_SINCE=s.LAST_SUCCESSFUL_SINCE, UPDATED_AT=CURRENT_TIMESTAMP()
                 WHEN NOT MATCHED THEN INSERT (FEED_NAME, LAST_SUCCESSFUL_SINCE) VALUES (s.FEED_NAME, s.LAST_SUCCESSFUL_SINCE)
                 """,
-                {"feed": FEED_NAME, "since": value},
+                {"feed": feed_name, "since": value},
             )
         conn.commit()
     finally:
@@ -193,11 +208,17 @@ def _close_run(conn: Any, run_id: int, status: str, notes: str) -> None:
 
 
 def run(*, bootstrap_days: int, overlap_minutes: int, seasons: set[str], match_lookup_pause_seconds: float,
-        max_match_lookups: int | None = None, dry_run: bool = False) -> dict[str, int]:
+        max_match_lookups: int | None = None, dry_run: bool = False,
+        competition_ids: set[int] | None = None, feed_name: str = FEED_NAME,
+        seed_missing: bool = False) -> dict[str, int]:
     started_at = datetime.now(timezone.utc)
-    iterations = eligible_iterations(seasons)
+    iterations = eligible_iterations(seasons, competition_ids)
+    if not iterations:
+        scope = f" for competition ids {sorted(competition_ids)}" if competition_ids else ""
+        raise RuntimeError(f"No eligible IMPECT iterations found{scope} in seasons {sorted(seasons)}")
     known = load_known_state()
-    stored_since = load_since(started_at - timedelta(days=bootstrap_days))
+    loaded_match_ids = load_event_match_ids()
+    stored_since = load_since(started_at - timedelta(days=bootstrap_days), feed_name)
     query_since = stored_since - timedelta(minutes=overlap_minutes)
     since_text = query_since.isoformat()
 
@@ -209,7 +230,26 @@ def run(*, bootstrap_days: int, overlap_minutes: int, seasons: set[str], match_l
     # bursts of per-match requests.
     match_updates = {int(row["id"]): row for row in _records(api.get_match_updates(since_text))}
     deletions = _records(api.get_match_deletes(since_text))
-    candidates: list[tuple[dict, dict, datetime | None]] = []
+    candidates: dict[int, tuple[dict, dict, datetime | None]] = {}
+
+    # A scoped scheduled job must be able to catch up even when its cursor is
+    # first created after the season has started. Enumerate the selected
+    # iteration catalogues and seed only past, data-ready matches not already
+    # present in EVENTS. The delta feed below then adds recalculations.
+    scoped_match_ids: set[int] = set()
+    if seed_missing or competition_ids is not None:
+        for iteration_id, iteration in iterations.items():
+            for match in _records(api.get_matches(iteration_id)):
+                match_id = int(match["id"])
+                scoped_match_ids.add(match_id)
+                match.setdefault("iterationId", iteration_id)
+                scheduled_at = _as_utc(match.get("scheduledDate"))
+                available = "available" not in match or _truthy(match.get("available"))
+                prior_status = (known.get(match_id) or {}).get("status")
+                should_seed = prior_status not in {NO_EVENT_DATA, DELETED}
+                if (seed_missing and should_seed and match_id not in loaded_match_ids
+                        and available and scheduled_at and scheduled_at <= started_at):
+                    candidates[match_id] = (iteration, match, _as_utc(match.get("lastCalculationDate")))
 
     match_lookups = 0
     for match_id, updated_at in match_data_updates.items():
@@ -228,9 +268,16 @@ def run(*, bootstrap_days: int, overlap_minutes: int, seasons: set[str], match_l
         scheduled_at = _as_utc(match.get("scheduledDate"))
         if not scheduled_at or scheduled_at > started_at:
             continue
-        candidates.append((iterations[int(match["iterationId"])], match, updated_at))
+        candidates[match_id] = (iterations[int(match["iterationId"])], match, updated_at)
 
-    known_deletions = [int(row["id"]) for row in deletions if int(row.get("id") or 0) in known]
+    known_ids = set(known) | loaded_match_ids
+    known_deletions = [
+        int(row["id"]) for row in deletions
+        if int(row.get("id") or 0) in known_ids
+        and (competition_ids is None or int(row.get("id") or 0) in scoped_match_ids)
+    ]
+    for match_id in known_deletions:
+        candidates.pop(match_id, None)
     print(f"Feed since {since_text}: {len(match_data_updates)} match-data updates, {len(deletions)} deletions, "
           f"{len(candidates)} eligible men's event sync(s), {len(known_deletions)} tracked deletion(s), "
           f"{match_lookups} metadata lookup(s).")
@@ -243,7 +290,7 @@ def run(*, bootstrap_days: int, overlap_minutes: int, seasons: set[str], match_l
         for match_id in known_deletions:
             mark_deleted(match_id, run_id)
             deleted += 1
-        for iteration, match, updated_at in candidates:
+        for iteration, match, updated_at in candidates.values():
             try:
                 rows = events.fetch_events_for_match(int(match["id"]), int(iteration["id"]), run_id)
                 if not rows:
@@ -265,7 +312,7 @@ def run(*, bootstrap_days: int, overlap_minutes: int, seasons: set[str], match_l
     # Advance only after every feed record was handled. Failed match fetches
     # remain eligible through the overlap and are also visible in state.
     if not failed:
-        save_since(started_at)
+        save_since(started_at, feed_name)
     return {"candidates": len(candidates), "deletions": deleted, "loaded": loaded, "failed": failed}
 
 
@@ -279,6 +326,12 @@ def parse_args() -> argparse.Namespace:
                         help="Pace fallback match-metadata requests to respect IMPECT limits (default: 0.35).")
     parser.add_argument("--max-match-lookups", type=int, default=None,
                         help="Cap fallback metadata lookups; intended only for bounded dry-runs.")
+    parser.add_argument("--competition-ids", default=None,
+                        help="Optional comma-separated IMPECT competition ids to include.")
+    parser.add_argument("--feed-name", default=FEED_NAME,
+                        help="Cursor key in IMPECT_FEED_CURSORS (use a distinct key for a scoped sync).")
+    parser.add_argument("--seed-missing", action="store_true",
+                        help="Also load past, available matches missing from IMPECT_RAW.EVENTS.")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -288,4 +341,7 @@ if __name__ == "__main__":
     run(bootstrap_days=args.bootstrap_days, overlap_minutes=args.overlap_minutes,
         seasons={value.strip() for value in args.seasons.split(",") if value.strip()},
         match_lookup_pause_seconds=args.match_lookup_pause_seconds,
-        max_match_lookups=args.max_match_lookups, dry_run=args.dry_run)
+        max_match_lookups=args.max_match_lookups, dry_run=args.dry_run,
+        competition_ids=({int(value.strip()) for value in args.competition_ids.split(",") if value.strip()}
+                         if args.competition_ids else None),
+        feed_name=args.feed_name, seed_missing=args.seed_missing)

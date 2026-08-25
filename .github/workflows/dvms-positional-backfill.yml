@@ -1,5 +1,10 @@
 name: DVMS Championship positional sync
 
+# DISABLED 2026-08-23: superseded by championship-sync.yml, whose
+# dvms-positional job runs this same script on the new Sun/Wed/Thu cadence,
+# after dvms-fixtures. Schedule trigger removed; workflow_dispatch kept for
+# manual/historic use.
+#
 # One-off/manual backfill of the raw Second Spectrum positional tracking
 # feed (~420-470MB/match JSONL) into CAFC_DB.DVMS_RAW.POSITIONAL_STAGE.
 # Separate from the weekly DVMS pull (dvms-weekly.yml) because these files
@@ -20,9 +25,6 @@ name: DVMS Championship positional sync
 
 on:
   workflow_dispatch: {}
-  schedule:
-    # Both UTC hours are triggered; the first step selects 10:00 Europe/London.
-    - cron: "0 9,10 * * 0,1,3,4"
 
 concurrency:
   group: dvms-positional-backfill

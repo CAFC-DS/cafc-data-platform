@@ -1,15 +1,16 @@
 name: IMPECT men's event sync
 
+# DISABLED 2026-08-23: superseded by championship-sync.yml, which covers
+# the EFL Championship on the new Sun/Wed/Thu cadence. Schedule trigger
+# removed so this no longer runs automatically; workflow_dispatch is kept
+# for manual/historic use (e.g. catching up a non-Championship competition).
+#
 # Low-cost scheduled ingestion for every accessible non-women's competition.
 # The Python job discovers iterations dynamically; it never embeds a season
 # or competition id. GitHub Actions is used because this repository already
 # stores credentials there and no always-on infrastructure is required.
 
 on:
-  schedule:
-    # GitHub Actions cron is UTC. Trigger at both possible UTC hours and let
-    # the first step continue only at 09:15 Europe/London (BST and GMT).
-    - cron: "15 8,9 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
