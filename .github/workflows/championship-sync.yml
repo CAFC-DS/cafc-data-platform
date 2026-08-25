@@ -1,0 +1,169 @@
+name: EFL Championship sync (IMPECT + DVMS)
+
+# Consolidated Sun/Wed/Thu ingestion for the EFL Championship, replacing the
+# three now-disabled workflows: impect-events-sync.yml (all competitions,
+# daily), dvms-weekly.yml (fixtures/assets, Sun/Mon/Wed/Thu), and
+# dvms-positional-backfill.yml (tracking feeds, Sun/Mon/Wed/Thu). Scoped to
+# Championship-only for both sources; see PR discussion 2026-08-23 for why
+# (IMPECT: competition id 41; DVMS: competitionId
+# 5f282b8c8cdf2d0b082cc81c / season 2026 for 26-27).
+#
+# Three jobs, gated on the same London-time check so a schedule firing at
+# either possible UTC hour only actually runs once:
+#   impect-championship - IMPECT match events for the Championship.
+#   dvms-fixtures       - DVMS fixtures + small asset content (event data,
+#                          metadata, physical stats).
+#   dvms-positional     - raw Second Spectrum positional tracking
+#                          (~420-470MB/match). Runs after dvms-fixtures
+#                          (needs:) because it works purely off assets
+#                          already cataloged by that job -- see
+#                          load_dvms_positional.py's module docstring.
+#
+# All three underlying scripts are resumable. IMPECT replaces matches only
+# when its delta feed reports a recalculation; DVMS skips assets already
+# loaded or staged, so a slow or interrupted run resumes next firing.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # GitHub Actions cron is UTC. Both possible UTC hours are triggered;
+    # the gate job selects 09:00 Europe/London (BST and GMT). Sunday(0),
+    # Wednesday(3), Thursday(4).
+    - cron: "0 8,9 * * 0,3,4"
+
+concurrency:
+  group: championship-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.london_time.outputs.run }}
+    steps:
+      - name: Check London schedule
+        id: london_time
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$(TZ=Europe/London date +%H:%M)" = "09:00" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  impect-championship:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: python/extract/impect
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        working-directory: .
+        run: pip install -e .
+
+      - name: Write Snowflake private key
+        env:
+          SNOWFLAKE_PRIVATE_KEY_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$SNOWFLAKE_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/snowflake_key.pem"
+          chmod 600 "$RUNNER_TEMP/snowflake_key.pem"
+
+      - name: Sync Championship match events
+        env:
+          IMPECT_USERNAME: ${{ secrets.IMPECT_USERNAME }}
+          IMPECT_PASSWORD: ${{ secrets.IMPECT_PASSWORD }}
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_DATABASE: CAFC_DB
+        run: |
+          export SNOWFLAKE_PRIVATE_KEY_PATH="$RUNNER_TEMP/snowflake_key.pem"
+          python sync_championship_events.py
+
+  dvms-fixtures:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Write Snowflake private key
+        env:
+          SNOWFLAKE_PRIVATE_KEY_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$SNOWFLAKE_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/snowflake_key.pem"
+          chmod 600 "$RUNNER_TEMP/snowflake_key.pem"
+
+      - name: Run DVMS extractor
+        env:
+          DVMS_USERNAME: ${{ secrets.DVMS_USERNAME }}
+          DVMS_PASSWORD: ${{ secrets.DVMS_PASSWORD }}
+          DVMS_COMPETITION_ID: 5f282b8c8cdf2d0b082cc81c
+          DVMS_SEASON: "2026"
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_DATABASE: CAFC_DB
+        run: |
+          export SNOWFLAKE_PRIVATE_KEY_PATH="$RUNNER_TEMP/snowflake_key.pem"
+          python -m python.extract.dvms.load_dvms_fixtures --triggered-by github-actions
+
+  dvms-positional:
+    needs: [gate, dvms-fixtures]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Write Snowflake private key
+        env:
+          SNOWFLAKE_PRIVATE_KEY_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$SNOWFLAKE_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/snowflake_key.pem"
+          chmod 600 "$RUNNER_TEMP/snowflake_key.pem"
+
+      - name: Run DVMS positional sync
+        env:
+          DVMS_USERNAME: ${{ secrets.DVMS_USERNAME }}
+          DVMS_PASSWORD: ${{ secrets.DVMS_PASSWORD }}
+          DVMS_COMPETITION_ID: 5f282b8c8cdf2d0b082cc81c
+          DVMS_SEASON: "2026"
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_DATABASE: CAFC_DB
+        run: |
+          export SNOWFLAKE_PRIVATE_KEY_PATH="$RUNNER_TEMP/snowflake_key.pem"
+          python -m python.extract.dvms.load_dvms_positional

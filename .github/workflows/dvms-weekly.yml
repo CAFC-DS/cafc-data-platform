@@ -1,5 +1,10 @@
 name: DVMS Championship sync
 
+# DISABLED 2026-08-23: superseded by championship-sync.yml, which pulls
+# fixtures/assets AND positional tracking on the new Sun/Wed/Thu cadence.
+# Schedule trigger removed so this no longer runs automatically;
+# workflow_dispatch is kept for manual/historic use.
+#
 # Pulls Championship fixtures + asset content (event data, metadata, physical
 # stats) from the Hudl DVMS API into CAFC_DB.DVMS_RAW. Runs on GitHub's
 # infrastructure rather than a local schedule because the source machine
@@ -14,9 +19,6 @@ name: DVMS Championship sync
 # separate Snowflake-internal-stage build.
 
 on:
-  schedule:
-    # Both UTC hours are triggered; the first step selects 09:30 Europe/London.
-    - cron: "30 8,9 * * 0,1,3,4"
   workflow_dispatch: {} # manual trigger from the Actions tab
 
 jobs:

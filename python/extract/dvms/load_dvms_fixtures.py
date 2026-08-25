@@ -327,12 +327,9 @@ def run(
             log.info("Total unique fixtures for competition=%s season=%s: %d", competition_id, season, len(all_fixtures))
 
         if not all_fixtures:
-            status, notes = "FAILED", "0 fixtures returned — check competition_id/season/credentials."
+            notes = "0 fixtures returned — check competition_id/season/credentials."
             log.warning(notes)
-            with conn.cursor() as cur:
-                _close_run(cur, run_id, status, notes)
-            conn.commit()
-            return run_id
+            raise RuntimeError(notes)
 
         total_fixtures, total_assets, downloaded_bytes = 0, 0, 0
         for start in range(0, len(all_fixtures), BATCH_SIZE):

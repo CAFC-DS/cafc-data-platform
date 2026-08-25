@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -160,7 +161,9 @@ def _build_argparser() -> argparse.ArgumentParser:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = _build_argparser().parse_args()
-    run(competition_id=args.competition_id, limit=args.limit, fixture_ids=args.fixture_id)
+    result = run(competition_id=args.competition_id, limit=args.limit, fixture_ids=args.fixture_id)
+    if result["failed"]:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
