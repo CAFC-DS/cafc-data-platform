@@ -132,36 +132,98 @@ def _download_or_raise(session, competition_id: str, fixture_id: str, asset_id: 
         return None, None
 
 
-def _collect_all_fixtures(session, competition_id: str, season: str) -> list[dict]:
+def _fixture_team_ids(fixture: dict) -> set[str]:
+    return {
+        team_id
+        for team_id in (fixture.get("optaHomeTeamId"), fixture.get("optaAwayTeamId"))
+        if team_id
+    }
+
+
+def _collect_all_fixtures(
+    session,
+    competition_id: str,
+    season: str,
+    bootstrap_team_ids: set[str] | None = None,
+) -> list[dict]:
     """iter_fixtures() (by-competition pagination) caps at ~round 39 for
     reasons that don't surface as an error — confirmed live it misses the
     final ~90 fixtures including all playoff rounds. get_team_fixtures()
     does return a team's complete season including playoffs, so: seed a
     team-id list from the (incomplete) competition pull, then pull every
-    team's complete fixture list and dedupe by fixtureId. A team appears in
-    ~2x its fixture count of calls (once as the pulling team, implicitly
-    included in opponents' pulls too), but dedup makes that free.
+    team's complete fixture list and dedupe by fixtureId.
+
+    At the start of 2026/27 the competition endpoint returned zero while the
+    per-team endpoint returned valid fixtures. In that case, seed discovery
+    from stored/configured team IDs. Every team response can introduce new
+    opponents, so traverse those IDs until the current fixture graph is
+    exhausted. This also brings promoted/relegated teams into scope without a
+    hardcoded league roster.
     """
     seed = list(dvms_client.iter_fixtures(session, competition_id, season))
-    team_ids = set()
-    for f in seed:
-        for key in ("optaHomeTeamId", "optaAwayTeamId"):
-            tid = f.get(key)
-            if tid:
-                team_ids.add(tid)
-    log.info("Seed pull: %d fixtures, %d distinct teams", len(seed), len(team_ids))
+    team_ids: set[str] = set()
+    for fixture in seed:
+        team_ids.update(_fixture_team_ids(fixture))
+    if not seed:
+        team_ids.update(bootstrap_team_ids or ())
+    log.info("Seed pull: %d fixtures, %d team ids available for per-team discovery", len(seed), len(team_ids))
+    if not seed and team_ids:
+        log.warning(
+            "Competition endpoint returned 0 fixtures; falling back to %d stored/configured team id(s).",
+            len(team_ids),
+        )
 
     by_fixture_id = {f["fixtureId"]: f for f in seed if f.get("fixtureId")}
-    for team_id in sorted(team_ids):
-        time.sleep(config.DOWNLOAD_DELAY_SECONDS)
+    pending_team_ids = sorted(team_ids)
+    queried_team_ids: set[str] = set()
+    while pending_team_ids:
+        team_id = pending_team_ids.pop(0)
+        if team_id in queried_team_ids:
+            continue
+        if queried_team_ids:
+            time.sleep(config.DOWNLOAD_DELAY_SECONDS)
         team_fixtures = dvms_client.get_team_fixtures(session, competition_id, season, team_id)
-        for f in team_fixtures:
-            fid = f.get("fixtureId")
+        queried_team_ids.add(team_id)
+        for fixture in team_fixtures:
+            fid = fixture.get("fixtureId")
             if fid:
-                by_fixture_id[fid] = f
-        log.info("Team %s -> %d fixtures (running unique total: %d)", team_id, len(team_fixtures), len(by_fixture_id))
+                by_fixture_id[fid] = fixture
+            for discovered_team_id in sorted(_fixture_team_ids(fixture)):
+                if discovered_team_id not in queried_team_ids and discovered_team_id not in pending_team_ids:
+                    pending_team_ids.append(discovered_team_id)
+        log.info(
+            "Team %s -> %d fixtures (running unique total: %d, discovered teams: %d)",
+            team_id, len(team_fixtures), len(by_fixture_id), len(queried_team_ids) + len(pending_team_ids),
+        )
 
     return list(by_fixture_id.values())
+
+
+def _load_known_team_ids(conn, schema: str, competition_id: str) -> set[str]:
+    """Return every team ID previously seen for this DVMS competition.
+
+    Historical seasons are intentionally included: continuing clubs seed the
+    new-season per-team endpoint, whose fixture responses then recursively
+    discover promoted/relegated opponents.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT DISTINCT TEAM_ID
+            FROM (
+                SELECT OPTA_HOME_TEAM_ID AS TEAM_ID
+                FROM CAFC_DB.{schema}.FIXTURES
+                WHERE COMPETITION_ID = %(competition_id)s
+                UNION
+                SELECT OPTA_AWAY_TEAM_ID AS TEAM_ID
+                FROM CAFC_DB.{schema}.FIXTURES
+                WHERE COMPETITION_ID = %(competition_id)s
+            )
+            WHERE TEAM_ID IS NOT NULL
+            """,
+            {"competition_id": competition_id},
+        )
+        return {str(row[0]) for row in cur.fetchall() if row[0]}
 
 
 def _load_known_state(conn, schema: str) -> tuple[dict, set]:
@@ -323,7 +385,12 @@ def run(
             all_fixtures = _last_n_team_fixtures(session, competition_id, season, team_id, last_n)
             log.info("Scoped to team=%s, last %d played fixture(s): %d found.", team_id, last_n, len(all_fixtures))
         else:
-            all_fixtures = _collect_all_fixtures(session, competition_id, season)
+            bootstrap_team_ids = _load_known_team_ids(conn, config.SNOWFLAKE_SCHEMA, competition_id)
+            bootstrap_team_ids.update(config.DVMS_BOOTSTRAP_TEAM_IDS)
+            log.info("Loaded %d stored/configured team id(s) for fixture discovery.", len(bootstrap_team_ids))
+            all_fixtures = _collect_all_fixtures(
+                session, competition_id, season, bootstrap_team_ids=bootstrap_team_ids,
+            )
             log.info("Total unique fixtures for competition=%s season=%s: %d", competition_id, season, len(all_fixtures))
 
         if not all_fixtures:

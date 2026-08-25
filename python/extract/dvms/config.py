@@ -25,6 +25,17 @@ DVMS_PASSWORD = os.getenv("DVMS_PASSWORD")
 DVMS_COMPETITION_ID = os.getenv("DVMS_COMPETITION_ID", "5f282b8c8cdf2d0b082cc81c")
 DVMS_SEASON = os.getenv("DVMS_SEASON", "2025")
 
+# The competition-wide endpoint can return an empty fixture page at the start
+# of a new season even while per-team fixture endpoints are populated. These
+# Opta team IDs bootstrap per-team discovery in that case. t33 is Charlton
+# Athletic (confirmed live for 2026/27); additional IDs can be supplied as a
+# comma-separated environment value without changing code.
+DVMS_BOOTSTRAP_TEAM_IDS = tuple(
+    value.strip()
+    for value in os.getenv("DVMS_BOOTSTRAP_TEAM_IDS", "t33").split(",")
+    if value.strip()
+)
+
 # 100 confirmed working live; the API silently returns 0 fixtures for very
 # large limits (1000 tested, returned nothing) rather than erroring, so stay
 # conservative rather than guessing a higher ceiling.
