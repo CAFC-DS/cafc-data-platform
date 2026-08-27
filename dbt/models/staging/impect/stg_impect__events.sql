@@ -1,11 +1,10 @@
 /*
   stg_impect__events
   -------------------
-  Typed view over IMPECT_RAW.EVENTS, narrowed to the columns needed to derive
-  a player's most recent playing position without touching the KPI/score
-  facts (see core_player_recent_position.sql). Not a full canonical event
-  fact -- this platform deliberately isn't building one yet (raw per-provider
-  storage is enough until bespoke analysis models are designed on top).
+  Typed view over IMPECT_RAW.EVENTS, narrowed to the columns needed for recent
+  player position and match-period timing. Playerless events are retained
+  because the final event in a period can define its authoritative duration.
+  This is not a full canonical event fact.
 */
 
 with source as (
@@ -17,8 +16,10 @@ select
     iteration_id,
     event_id,
     event_index,
+    period_id,
+    game_time,
+    game_time_in_sec,
     player_id               as impect_player_id,
     player_position,
-    game_time_in_sec
+    player_position_side
 from source
-where player_id is not null

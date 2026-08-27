@@ -20,6 +20,7 @@ from typing import Any
 
 import impect_api as api
 import load_match_events as events
+import load_match_info as match_info
 from snowflake_loader import get_connection
 
 
@@ -179,6 +180,7 @@ def mark_deleted(match_id: int, run_id: int) -> None:
     try:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM CAFC_DB.IMPECT_RAW.EVENTS WHERE MATCH_ID = %(match_id)s", {"match_id": match_id})
+            cur.execute("DELETE FROM CAFC_DB.IMPECT_RAW.MATCH_INFO WHERE MATCH_ID = %(match_id)s", {"match_id": match_id})
             cur.execute(
                 f"UPDATE {STATE_TABLE} SET STATUS=%(status)s, EVENT_COUNT=0, LAST_ATTEMPTED_AT=CURRENT_TIMESTAMP(), "
                 "LAST_ERROR='Removed by IMPECT delete/merge feed', INGESTION_RUN_ID=%(run_id)s, UPDATED_AT=CURRENT_TIMESTAMP() "
@@ -298,6 +300,7 @@ def run(*, bootstrap_days: int, overlap_minutes: int, seasons: set[str], match_l
                     save_state(match, iteration, NO_EVENT_DATA, updated_at, 0, None, run_id)
                     continue
                 count = events.load_events(rows, replace_existing_match=True)
+                match_info.fetch_and_load(int(match["id"]), int(iteration["id"]), run_id)
                 save_state(match, iteration, SUCCESS, updated_at, count, None, run_id)
                 loaded += 1
             except Exception as exc:
