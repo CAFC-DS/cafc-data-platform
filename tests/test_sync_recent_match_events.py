@@ -86,6 +86,12 @@ def test_scoped_sync_replaces_delta_match_and_advances_own_cursor(monkeypatch):
     monkeypatch.setattr(sync, "_close_run", lambda *args: None)
     monkeypatch.setattr(sync, "save_state", lambda *args: None)
     monkeypatch.setattr(sync.events, "fetch_events_for_match", lambda *args: [{"MATCH_ID": 1}])
+    match_info_loaded = []
+    monkeypatch.setattr(
+        sync.match_info,
+        "fetch_and_load",
+        lambda match_id, iteration_id, run_id: match_info_loaded.append((match_id, iteration_id, run_id)),
+    )
     replacements = []
     monkeypatch.setattr(
         sync.events,
@@ -107,6 +113,7 @@ def test_scoped_sync_replaces_delta_match_and_advances_own_cursor(monkeypatch):
 
     assert result["loaded"] == 1
     assert replacements == [True]
+    assert match_info_loaded == [(1, 2601, 77)]
     assert saved[0][1] == "MATCH_EVENTS_V5_COMPETITION_41"
     assert isinstance(saved[0][0], datetime)
     assert saved[0][0].tzinfo == timezone.utc

@@ -44,9 +44,18 @@ python load_countries.py    # Loads all countries
 python load_championship_match_details.py # Downloads last 5 Championship seasons and loads IMPECT_RAW Championship tables
 python load_championship_match_details.py --limit-matches 10 # Useful test run
 python load_championship_match_details.py --skip-snowflake # Keep local files only
+python load_match_info.py --bootstrap-legacy # Reuse saved Championship lineups
+python load_match_info.py --backfill-events  # Resume missing match-info rows for EVENTS
 ```
 
-All scripts do a full replace (TRUNCATE + INSERT) on each run.
+Reference-table scripts do a full replace. Event and match-info loaders are
+incremental and resumable; `MATCH_INFO` is merged on `MATCH_ID`.
+
+Before the first participation build, apply
+`snowflake/ddl/20260827_impect_match_info.sql`, then run the two
+`load_match_info.py` commands above and finally build
+`core_player_fixture_participation` and `core_player_iteration_participation`
+with dbt. Subsequent event syncs keep match info current automatically.
 
 ## Snowflake Tables
 
@@ -54,6 +63,7 @@ All scripts do a full replace (TRUNCATE + INSERT) on each run.
 |---|---|
 | `load_iterations.py` | `CAFC_DB.IMPECT_RAW.ITERATIONS` |
 | `load_matches.py` | `CAFC_DB.IMPECT_RAW.MATCHES` |
+| `load_match_info.py` | `CAFC_DB.IMPECT_RAW.MATCH_INFO` |
 | `load_squads.py` | `CAFC_DB.IMPECT_RAW.SQUADS` |
 | `load_squad_ratings.py` | `CAFC_DB.IMPECT_RAW.SQUAD_RATINGS` |
 | `load_players.py` | `CAFC_DB.IMPECT_RAW.PLAYERS` |
