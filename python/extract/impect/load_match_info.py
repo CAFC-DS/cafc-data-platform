@@ -54,8 +54,9 @@ def payload_row(payload: dict[str, Any], match_id: int, iteration_id: int | None
     }
 
 
-def upsert(row: dict[str, Any]) -> None:
-    conn = get_connection()
+def upsert(row: dict[str, Any], conn=None) -> None:
+    owns_connection = conn is None
+    conn = conn or get_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -95,14 +96,19 @@ def upsert(row: dict[str, Any]) -> None:
             )
         conn.commit()
     finally:
-        conn.close()
+        if owns_connection:
+            conn.close()
 
 
-def fetch_and_load(match_id: int, iteration_id: int | None, run_id: int | None = None) -> None:
+def fetch_and_load(match_id: int, iteration_id: int | None, run_id: int | None = None, conn=None) -> None:
     payload = _payload(api.get_match_info(match_id))
     if not payload:
         raise RuntimeError(f"Empty match-info payload for match {match_id}")
-    upsert(payload_row(payload, match_id, iteration_id, run_id))
+    row = payload_row(payload, match_id, iteration_id, run_id)
+    if conn is None:
+        upsert(row)
+    else:
+        upsert(row, conn=conn)
 
 
 def bootstrap_legacy(*, dry_run: bool = False) -> int:
@@ -153,7 +159,9 @@ def bootstrap_legacy(*, dry_run: bool = False) -> int:
         conn.close()
 
 
-def missing_event_matches(limit: int | None = None) -> list[tuple[int, int | None]]:
+def missing_event_matches(limit: int | None = None, lane: int = 0, lanes: int = 1) -> list[tuple[int, int | None]]:
+    if lanes < 1 or lane < 0 or lane >= lanes:
+        raise ValueError("lane must be in the range 0 <= lane < lanes")
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -162,36 +170,42 @@ def missing_event_matches(limit: int | None = None) -> list[tuple[int, int | Non
                 FROM CAFC_DB.IMPECT_RAW.EVENTS e
                 LEFT JOIN {TABLE} i ON i.MATCH_ID=e.MATCH_ID
                 WHERE i.MATCH_ID IS NULL
+                  AND MOD(e.MATCH_ID, %(lanes)s) = %(lane)s
                 GROUP BY e.MATCH_ID
                 ORDER BY e.MATCH_ID
             """
             if limit is not None:
                 sql += " LIMIT %(limit)s"
-                cur.execute(sql, {"limit": limit})
+                cur.execute(sql, {"limit": limit, "lane": lane, "lanes": lanes})
             else:
-                cur.execute(sql)
+                cur.execute(sql, {"lane": lane, "lanes": lanes})
             return [(int(row[0]), int(row[1]) if row[1] is not None else None) for row in cur.fetchall()]
     finally:
         conn.close()
 
 
-def backfill(*, limit: int | None, pause_seconds: float, dry_run: bool) -> dict[str, int]:
-    matches = missing_event_matches(limit)
+def backfill(*, limit: int | None, pause_seconds: float, dry_run: bool,
+             lane: int = 0, lanes: int = 1) -> dict[str, int]:
+    matches = missing_event_matches(limit, lane=lane, lanes=lanes)
     if dry_run:
         return {"candidates": len(matches), "loaded": 0, "failed": 0}
     loaded = failed = 0
-    for index, (match_id, iteration_id) in enumerate(matches):
-        if index:
-            time.sleep(pause_seconds)
-        try:
-            fetch_and_load(match_id, iteration_id)
-            loaded += 1
-        except Exception as exc:
-            failed += 1
-            print(f"match {match_id}: {exc}", file=sys.stderr)
-        processed = index + 1
-        if processed % 100 == 0 or processed == len(matches):
-            print(f"progress: {processed}/{len(matches)} loaded={loaded} failed={failed}")
+    conn = get_connection()
+    try:
+        for index, (match_id, iteration_id) in enumerate(matches):
+            if index:
+                time.sleep(pause_seconds)
+            try:
+                fetch_and_load(match_id, iteration_id, conn=conn)
+                loaded += 1
+            except Exception as exc:
+                failed += 1
+                print(f"match {match_id}: {exc}", file=sys.stderr)
+            processed = index + 1
+            if processed % 100 == 0 or processed == len(matches):
+                print(f"lane {lane}/{lanes} progress: {processed}/{len(matches)} loaded={loaded} failed={failed}")
+    finally:
+        conn.close()
     return {"candidates": len(matches), "loaded": loaded, "failed": failed}
 
 
@@ -202,6 +216,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backfill-events", action="store_true")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--pause-seconds", type=float, default=0.35)
+    parser.add_argument("--lane", type=int, default=0, help="Deterministic lane number (default: 0).")
+    parser.add_argument("--lanes", type=int, default=1, help="Total parallel lanes (default: 1).")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -213,4 +229,5 @@ if __name__ == "__main__":
     if args.bootstrap_legacy:
         print({"legacy_rows": bootstrap_legacy(dry_run=args.dry_run)})
     if args.backfill_events:
-        print(backfill(limit=args.limit, pause_seconds=args.pause_seconds, dry_run=args.dry_run))
+        print(backfill(limit=args.limit, pause_seconds=args.pause_seconds, dry_run=args.dry_run,
+                       lane=args.lane, lanes=args.lanes))

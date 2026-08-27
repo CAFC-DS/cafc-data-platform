@@ -49,18 +49,23 @@ def test_fetch_and_load_uses_unwrapped_payload(monkeypatch):
 
 
 def test_backfill_continues_after_one_match_fails(monkeypatch, capsys):
-    monkeypatch.setattr(loader, "missing_event_matches", lambda limit: [(1, 10), (2, 10)])
+    monkeypatch.setattr(loader, "missing_event_matches", lambda limit, lane=0, lanes=1: [(1, 10), (2, 10)])
     loaded = []
 
-    def fake_fetch(match_id, iteration_id, run_id=None):
+    def fake_fetch(match_id, iteration_id, run_id=None, conn=None):
         if match_id == 1:
             raise RuntimeError("temporary failure")
         loaded.append((match_id, iteration_id))
 
     monkeypatch.setattr(loader, "fetch_and_load", fake_fetch)
+    class FakeConnection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(loader, "get_connection", lambda: FakeConnection())
 
     result = loader.backfill(limit=None, pause_seconds=0, dry_run=False)
 
     assert result == {"candidates": 2, "loaded": 1, "failed": 1}
     assert loaded == [(2, 10)]
-    assert "progress: 2/2 loaded=1 failed=1" in capsys.readouterr().out
+    assert "lane 0/1 progress: 2/2 loaded=1 failed=1" in capsys.readouterr().out
