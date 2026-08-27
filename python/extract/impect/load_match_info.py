@@ -189,7 +189,11 @@ def backfill(*, limit: int | None, pause_seconds: float, dry_run: bool) -> dict[
         except Exception as exc:
             failed += 1
             print(f"match {match_id}: {exc}", file=sys.stderr)
+        processed = index + 1
+        if processed % 100 == 0 or processed == len(matches):
+            print(f"progress: {processed}/{len(matches)} loaded={loaded} failed={failed}")
     return {"candidates": len(matches), "loaded": loaded, "failed": failed}
+
 
 
 def parse_args() -> argparse.Namespace:

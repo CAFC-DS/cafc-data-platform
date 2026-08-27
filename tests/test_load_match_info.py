@@ -48,7 +48,7 @@ def test_fetch_and_load_uses_unwrapped_payload(monkeypatch):
     assert saved[0]["run_id"] == 8
 
 
-def test_backfill_continues_after_one_match_fails(monkeypatch):
+def test_backfill_continues_after_one_match_fails(monkeypatch, capsys):
     monkeypatch.setattr(loader, "missing_event_matches", lambda limit: [(1, 10), (2, 10)])
     loaded = []
 
@@ -63,3 +63,4 @@ def test_backfill_continues_after_one_match_fails(monkeypatch):
 
     assert result == {"candidates": 2, "loaded": 1, "failed": 1}
     assert loaded == [(2, 10)]
+    assert "progress: 2/2 loaded=1 failed=1" in capsys.readouterr().out

@@ -6,6 +6,35 @@ version: 2
 
 models:
 
+  - name: core_player_fixture_position_participation
+    description: "KPI-independent player minutes at fixture and position grain. Canonical denominator for raw event metrics grouped by PLAYER_POSITION."
+    columns:
+      - name: cafc_player_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: source('core', 'PLAYERS')
+                field: CAFC_PLAYER_ID
+      - name: cafc_fixture_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: source('core', 'FIXTURES')
+                field: CAFC_FIXTURE_ID
+      - name: cafc_season_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('core_seasons')
+                field: cafc_season_id
+      - name: position_code
+        tests: [not_null]
+      - name: play_duration_seconds
+        tests: [not_null]
+
   - name: core_player_fixture_participation
     description: "KPI-independent player minutes and dominant position, one row per canonical player, fixture and squad, reconstructed from match lineups and transitions."
     columns:
