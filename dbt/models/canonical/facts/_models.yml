@@ -6,6 +6,22 @@ version: 2
 
 models:
 
+  - name: core_impect_player_fixture_position_participation
+    description: "Source-grain Impect player minutes by fixture and position. Retains event-derived rows without requiring canonical player or fixture identity resolution."
+    columns:
+      - name: source_fixture_id
+        tests: [not_null]
+      - name: source_player_id
+        tests: [not_null]
+      - name: cafc_season_id
+        tests: [not_null]
+      - name: cafc_competition_id
+        tests: [not_null]
+      - name: position_code
+        tests: [not_null]
+      - name: play_duration_seconds
+        tests: [not_null]
+
   - name: core_player_fixture_position_participation
     description: "KPI-independent player minutes at fixture and position grain. Canonical denominator for raw event metrics grouped by PLAYER_POSITION."
     columns:
