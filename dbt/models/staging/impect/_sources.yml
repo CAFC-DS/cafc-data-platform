@@ -145,6 +145,17 @@ sources:
           - name: AVAILABLE
             description: "Whether IMPECT has computed KPIs for this match yet."
 
+      - name: MATCH_INFO
+        description: "Generic match metadata from GET /matches/{id}. Holds starters, positions, substitutions and formations for KPI-independent player participation."
+        columns:
+          - name: MATCH_ID
+            tests: [unique, not_null]
+          - name: ITERATION_ID
+          - name: HOME_STARTING_POSITIONS
+          - name: AWAY_STARTING_POSITIONS
+          - name: HOME_SUBSTITUTIONS
+          - name: AWAY_SUBSTITUTIONS
+
       # ----------------------------------------------------------------------
       # KPI fact tables — the big ones. Driven by championship-scoped extracts
       # today; will broaden when other competitions are pulled.

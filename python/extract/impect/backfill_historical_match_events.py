@@ -25,6 +25,7 @@ from snowflake.connector.pandas_tools import write_pandas
 import config
 import impect_api as api
 import load_match_events as events
+import load_match_info as match_info
 import refresh_iteration_metadata as metadata
 from snowflake_loader import get_connection
 
@@ -354,6 +355,7 @@ def process(batch_size: int, max_attempts: int, iteration_ids: set[int] | None =
                     no_event_data += 1
                     continue
                 count = events.load_events(rows, replace_existing_match=True)
+                match_info.fetch_and_load(item["match_id"], item["iteration_id"], run_id)
                 _finish_match(item["match_id"], "SUCCESS", run_id, event_count=count)
                 success += 1
                 print(f"match {item['match_id']}: loaded {count} events")

@@ -15,12 +15,15 @@ version: 2
 # rows are metadata-only today (type/subtype/key/ready/size) — actual file
 # content download is a follow-up, not yet built.
 #
-# No stg_dvms__*.sql views exist yet, deliberately: per the architecture
-# doc, don't force a unified model before asset *content* has actually been
-# pulled and inspected. Once python/extract/dvms/ downloads real payloads,
-# split by ASSET_SUBTYPE into typed staging views (Opta F7/F24 need XML
-# parsing, Second Spectrum spans JSON/JSONL/XML/CSV depending on sub-feed —
-# not a uniform TRY_PARSE_JSON like the IMPECT convention).
+# stg_dvms__fixtures is the only stg_dvms__*.sql view: a thin dedupe layer
+# collapsing the append-only FIXTURES replay buffer to one row per
+# FIXTURE_ID (latest by LOADED_AT). ASSETS is still consumed raw — no
+# stg_dvms__assets yet, deliberately: per the architecture doc, don't force
+# a unified asset model before asset *content* has actually been pulled and
+# inspected. Once python/extract/dvms/ downloads real payloads, split by
+# ASSET_SUBTYPE into typed staging views (Opta F7/F24 need XML parsing,
+# Second Spectrum spans JSON/JSONL/XML/CSV depending on sub-feed — not a
+# uniform TRY_PARSE_JSON like the IMPECT convention).
 # ============================================================================
 
 sources:

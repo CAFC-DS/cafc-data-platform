@@ -49,6 +49,7 @@ from snowflake.connector.pandas_tools import write_pandas
 
 import config
 import impect_api as api
+import load_match_info as match_info
 from snowflake_loader import get_connection
 
 TABLE_NAME = "EVENTS"
@@ -390,6 +391,7 @@ def run(iteration_id: int = None, match_ids: list[int] = None, force: bool = Fal
                 matches_no_data += 1
                 continue
             n = load_events(rows, replace_existing_match=force)
+            match_info.fetch_and_load(match_id, it_id, run_id)
             total_events += n
             matches_loaded += 1
             print(f"  match {match_id}: loaded {n} events")
