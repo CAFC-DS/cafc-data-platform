@@ -60,6 +60,9 @@ models:
       +tags: [staging]
       impect:
         +tags: [staging, impect]
+      dvms:
+        +schema: DVMS_RAW_STAGING   # views live alongside the raw they wrap
+        +tags: [staging, dvms]
 
     canonical:
       dimensions:

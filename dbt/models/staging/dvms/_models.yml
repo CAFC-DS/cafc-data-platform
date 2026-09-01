@@ -1,0 +1,19 @@
+version: 2
+
+# ============================================================================
+# DVMS staging models. stg_dvms__fixtures collapses the append-only
+# DVMS_RAW.FIXTURES replay buffer to one row per fixture (latest by
+# LOADED_AT) for consumers that expect a single current-state row.
+# ============================================================================
+
+models:
+
+  - name: stg_dvms__fixtures
+    description: >
+      One row per FIXTURE_ID: the latest row per fixture from the append-only
+      DVMS_RAW.FIXTURES buffer, ordered by LOADED_AT desc, INGESTION_RUN_ID desc.
+      Same current-state logic as load_dvms_fixtures.py::_load_known_state().
+    columns:
+      - name: fixture_id
+        description: "Hudl fixture id. Exactly one row per value in this model."
+        tests: [unique, not_null]
