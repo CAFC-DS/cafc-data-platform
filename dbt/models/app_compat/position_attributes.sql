@@ -5,4 +5,4 @@
   reference data; legacy passthrough until the Part 3 cutover (docs/decisions/0001).
 */
 
-select * from {{ source('recruitment_legacy', 'POSITION_ATTRIBUTES') }}
+select * from {{ source('core_app', 'POSITION_ATTRIBUTES') }}

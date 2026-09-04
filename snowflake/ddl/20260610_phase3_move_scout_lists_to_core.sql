@@ -1,0 +1,75 @@
+-- ============================================================================
+--  20260610_phase3_move_scout_lists_to_core.sql
+--  Phase 3 cutover: move the scout-reports + lists tables from
+--  RECRUITMENT_TEST.PUBLIC (legacy) to CAFC_DB.CORE (canonical home).
+--
+--  CREATE OR REPLACE ... CLONE is a zero-copy snapshot: instant, free until
+--  divergence, and re-runnable — every run refreshes CORE from legacy, so it
+--  is safe to run early for rehearsal and MUST be re-run at the cutover
+--  moment (inside the write freeze) so no rows are left behind.
+--
+--  Verified 2026-06-10 (rehearsal in CORE_DEV_HUMARJI): clones preserve all
+--  rows AND the AUTOINCREMENT counter — post-clone inserts continue above the
+--  source MAX(ID) (Snowflake strides the sequence by 100; gaps are normal).
+--
+--  Run with a role that owns CAFC_DB.CORE (DEV_ROLE today).
+--  Full choreography + rollback: docs/runbooks/phase-3-cutover.md
+-- ============================================================================
+
+-- ---- 1. Snapshot legacy first (free, instant, the undo button) -------------
+CREATE DATABASE IF NOT EXISTS RECRUITMENT_TEST_PRE_PHASE3 CLONE RECRUITMENT_TEST;
+
+-- ---- 2. Move the seven Phase 3 tables --------------------------------------
+CREATE OR REPLACE TABLE CAFC_DB.CORE.SCOUT_REPORTS                 CLONE RECRUITMENT_TEST.PUBLIC.SCOUT_REPORTS;
+CREATE OR REPLACE TABLE CAFC_DB.CORE.SCOUT_REPORT_ATTRIBUTE_SCORES CLONE RECRUITMENT_TEST.PUBLIC.SCOUT_REPORT_ATTRIBUTE_SCORES;
+CREATE OR REPLACE TABLE CAFC_DB.CORE.SCOUT_REPORT_VIEWS            CLONE RECRUITMENT_TEST.PUBLIC.SCOUT_REPORT_VIEWS;
+CREATE OR REPLACE TABLE CAFC_DB.CORE.PLAYER_LISTS                  CLONE RECRUITMENT_TEST.PUBLIC.PLAYER_LISTS;
+CREATE OR REPLACE TABLE CAFC_DB.CORE.PLAYER_LIST_ITEMS             CLONE RECRUITMENT_TEST.PUBLIC.PLAYER_LIST_ITEMS;
+CREATE OR REPLACE TABLE CAFC_DB.CORE.POSITION_ATTRIBUTES           CLONE RECRUITMENT_TEST.PUBLIC.POSITION_ATTRIBUTES;
+CREATE OR REPLACE TABLE CAFC_DB.CORE.SHARED_REPORT_LINKS           CLONE RECRUITMENT_TEST.PUBLIC.SHARED_REPORT_LINKS;
+
+-- ---- 3. Grants (clones do not inherit grants) ------------------------------
+-- APP_ROLE: the recruitment backend's prod role — full DML on app-owned
+-- tables, read-only on the scoring catalogue (app never writes it today).
+GRANT SELECT, INSERT, UPDATE, DELETE ON CAFC_DB.CORE.SCOUT_REPORTS                 TO ROLE APP_ROLE;
+GRANT SELECT, INSERT, UPDATE, DELETE ON CAFC_DB.CORE.SCOUT_REPORT_ATTRIBUTE_SCORES TO ROLE APP_ROLE;
+GRANT SELECT, INSERT, UPDATE, DELETE ON CAFC_DB.CORE.SCOUT_REPORT_VIEWS            TO ROLE APP_ROLE;
+GRANT SELECT, INSERT, UPDATE, DELETE ON CAFC_DB.CORE.PLAYER_LISTS                  TO ROLE APP_ROLE;
+GRANT SELECT, INSERT, UPDATE, DELETE ON CAFC_DB.CORE.PLAYER_LIST_ITEMS             TO ROLE APP_ROLE;
+GRANT SELECT                         ON CAFC_DB.CORE.POSITION_ATTRIBUTES           TO ROLE APP_ROLE;
+GRANT SELECT, INSERT, UPDATE, DELETE ON CAFC_DB.CORE.SHARED_REPORT_LINKS           TO ROLE APP_ROLE;
+
+-- DEV_ROLE (the role pipelines/analysts actually use -- DATA_PLATFORM_ROLE
+-- does not exist in this account): read-only on app-owned tables.
+GRANT SELECT ON CAFC_DB.CORE.SCOUT_REPORTS                 TO ROLE DEV_ROLE;
+GRANT SELECT ON CAFC_DB.CORE.SCOUT_REPORT_ATTRIBUTE_SCORES TO ROLE DEV_ROLE;
+GRANT SELECT ON CAFC_DB.CORE.SCOUT_REPORT_VIEWS            TO ROLE DEV_ROLE;
+GRANT SELECT ON CAFC_DB.CORE.PLAYER_LISTS                  TO ROLE DEV_ROLE;
+GRANT SELECT ON CAFC_DB.CORE.PLAYER_LIST_ITEMS             TO ROLE DEV_ROLE;
+GRANT SELECT ON CAFC_DB.CORE.POSITION_ATTRIBUTES           TO ROLE DEV_ROLE;
+GRANT SELECT ON CAFC_DB.CORE.SHARED_REPORT_LINKS           TO ROLE DEV_ROLE;
+
+-- ---- 4. Parity check (run immediately after the clone, inside the freeze) --
+-- Every row must match: counts identical per table. Any mismatch = a write
+-- slipped in after the clone → re-run section 2.
+SELECT 'SCOUT_REPORTS' t,
+       (SELECT COUNT(*) FROM RECRUITMENT_TEST.PUBLIC.SCOUT_REPORTS) legacy_n,
+       (SELECT COUNT(*) FROM CAFC_DB.CORE.SCOUT_REPORTS) core_n
+UNION ALL SELECT 'SCOUT_REPORT_ATTRIBUTE_SCORES',
+       (SELECT COUNT(*) FROM RECRUITMENT_TEST.PUBLIC.SCOUT_REPORT_ATTRIBUTE_SCORES),
+       (SELECT COUNT(*) FROM CAFC_DB.CORE.SCOUT_REPORT_ATTRIBUTE_SCORES)
+UNION ALL SELECT 'SCOUT_REPORT_VIEWS',
+       (SELECT COUNT(*) FROM RECRUITMENT_TEST.PUBLIC.SCOUT_REPORT_VIEWS),
+       (SELECT COUNT(*) FROM CAFC_DB.CORE.SCOUT_REPORT_VIEWS)
+UNION ALL SELECT 'PLAYER_LISTS',
+       (SELECT COUNT(*) FROM RECRUITMENT_TEST.PUBLIC.PLAYER_LISTS),
+       (SELECT COUNT(*) FROM CAFC_DB.CORE.PLAYER_LISTS)
+UNION ALL SELECT 'PLAYER_LIST_ITEMS',
+       (SELECT COUNT(*) FROM RECRUITMENT_TEST.PUBLIC.PLAYER_LIST_ITEMS),
+       (SELECT COUNT(*) FROM CAFC_DB.CORE.PLAYER_LIST_ITEMS)
+UNION ALL SELECT 'POSITION_ATTRIBUTES',
+       (SELECT COUNT(*) FROM RECRUITMENT_TEST.PUBLIC.POSITION_ATTRIBUTES),
+       (SELECT COUNT(*) FROM CAFC_DB.CORE.POSITION_ATTRIBUTES)
+UNION ALL SELECT 'SHARED_REPORT_LINKS',
+       (SELECT COUNT(*) FROM RECRUITMENT_TEST.PUBLIC.SHARED_REPORT_LINKS),
+       (SELECT COUNT(*) FROM CAFC_DB.CORE.SHARED_REPORT_LINKS);

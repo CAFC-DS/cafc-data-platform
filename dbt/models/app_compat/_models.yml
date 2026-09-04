@@ -13,15 +13,21 @@ version: 2
 
 models:
 
-  - name: players
-    description: "Legacy-shape player view. Mirrors RECRUITMENT_TEST.PUBLIC.PLAYERS column-for-column, sourced from CORE.* via stg_impect__players + canonical bridges."
+  - name: players_base
+    description: "Legacy-shape player snapshot table (rebuilt per dbt run). Mirrors RECRUITMENT_TEST.PUBLIC.PLAYERS column-for-column, sourced from CORE.* via stg_impect__players + canonical bridges. App reads `players`, not this."
     columns:
       - name: PLAYERID
         description: "Legacy external player ID (IMPECT player ID today). Same as RECRUITMENT_TEST.PUBLIC.PLAYERS.PLAYERID."
       - name: CAFC_PLAYER_ID
         description: "Canonical surrogate, resolved through overrides + identities."
       - name: DATA_SOURCE
-        description: "Constant 'IMPECT' on every row of this view today. UNION ALL extends to other sources later."
+        description: "'external' (has IMPECT identity) or 'internal' (manual)."
+
+  - name: players
+    description: "App-facing player contract: players_base UNION a live tail of CORE.PLAYERS rows minted since the last dbt build (Phase 5 — the app mints manual players directly into CORE and must see them immediately)."
+    columns:
+      - name: CAFC_PLAYER_ID
+        description: "Canonical surrogate; unique across base + tail by the anti-join."
 
   - name: matches
     description: "Legacy-shape match view. Mirrors RECRUITMENT_TEST.PUBLIC.MATCHES column-for-column. CAFC_MATCH_ID resolves through FIXTURE_IDENTITIES."

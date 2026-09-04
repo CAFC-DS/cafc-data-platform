@@ -4,4 +4,4 @@
   App-owned legacy passthrough; bridged until Part 3 cutover (docs/decisions/0001).
 */
 
-select * from {{ source('recruitment_legacy', 'AGENT_PROFILES') }}
+select * from {{ source('core_app', 'AGENT_PROFILES') }}
