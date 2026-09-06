@@ -84,7 +84,9 @@ def main() -> int:
     creds = json.load(open(args.creds_file))
 
     cur = _snowflake.get_connection().cursor()
-    cur.execute("USE ROLE ACCOUNTADMIN")
+    # DEV_ROLE owns CAFC_DB.CORE and can also read RECRUITMENT_TEST.PUBLIC;
+    # ACCOUNTADMIN was never granted SELECT on the moved CORE tables.
+    cur.execute("USE ROLE DEV_ROLE")
     cur.execute("USE WAREHOUSE DEVELOPMENT_WH")
 
     # ---- legacy baseline row counts (must not move) ----
