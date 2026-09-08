@@ -8,7 +8,11 @@
     - external: fixture has an IMPECT identity → ID = its primary IMPECT match id,
       rich metadata (matchday, cross-provider ids, scheduling) from IMPECT.
     - internal: no IMPECT identity (manually-added match) → ID = NULL; home/away/
-      date come from CORE.FIXTURES. (~203 internal, matching legacy's ~212.)
+      date come from CORE.FIXTURES. Team NAME is the scout's own entry
+      (FIXTURE_IDENTITIES.SOURCE_*_SQUAD_NAME, manual_names cte) — legacy
+      parity — falling back to the core_squads name only if that's absent.
+      Squad id / type / country still come from core_squads via the (repaired)
+      HOME/AWAY_SQUAD_ID. (~265 internal, == legacy.)
 
   29 columns, matching legacy column-for-column. CAFC_MATCH_ID = CAFC_FIXTURE_ID.
   Stays a view: the metadata join is over ~145k fixtures, not the big fact tables.
@@ -40,6 +44,30 @@ impect_identity as (
     where rn = 1
 ),
 
+-- Source-system team names for manually-added fixtures. Fallback for the
+-- residual where HOME/AWAY_SQUAD_ID doesn't resolve in core_squads (legacy
+-- free-text matches with no real squad id). Populated by
+-- python.identity.mint_legacy_manual_fixtures +
+-- snowflake/ddl/20260907_backfill_manual_fixture_squads.sql.
+manual_names as (
+    select cafc_fixture_id, source_home_squad_name, source_away_squad_name
+    from (
+        select
+            cafc_fixture_id,
+            source_home_squad_name,
+            source_away_squad_name,
+            row_number() over (
+                partition by cafc_fixture_id
+                order by case when is_primary then 0 else 1 end,
+                         match_confidence desc nulls last,
+                         fixture_identity_id
+            ) as rn
+        from {{ source('core', 'FIXTURE_IDENTITIES') }}
+        where source_system = 'MANUAL'
+    )
+    where rn = 1
+),
+
 impect_match as (
     select * from {{ ref('stg_impect__matches') }}
 ),
@@ -62,7 +90,7 @@ select
 
     -- Home squad denormalisation
     f.home_squad_id                                 as HOMESQUADID,
-    hs.squad_name                                   as HOMESQUADNAME,
+    coalesce(mn.source_home_squad_name, hs.squad_name) as HOMESQUADNAME,
     hs.squad_type                                   as HOMESQUADTYPE,
     hs.impect_country_id                            as HOMESQUADCOUNTRYID,
     hc.country_name                                 as HOMESQUADCOUNTRYNAME,
@@ -72,7 +100,7 @@ select
 
     -- Away squad denormalisation
     f.away_squad_id                                 as AWAYSQUADID,
-    a_s.squad_name                                  as AWAYSQUADNAME,
+    coalesce(mn.source_away_squad_name, a_s.squad_name) as AWAYSQUADNAME,
     a_s.squad_type                                  as AWAYSQUADTYPE,
     a_s.impect_country_id                           as AWAYSQUADCOUNTRYID,
     ac.country_name                                 as AWAYSQUADCOUNTRYNAME,
@@ -83,12 +111,17 @@ select
     coalesce(im.scheduled_at, f.fixture_date)       as SCHEDULEDDATE,
     im.last_calculation_at                          as LASTCALCULATIONDATE,
     im.is_available                                 as AVAILABLE,
-    concat(hs.squad_name, ' vs ', a_s.squad_name)   as MATCH_NAME,
+    concat(
+        coalesce(mn.source_home_squad_name, hs.squad_name),
+        ' vs ',
+        coalesce(mn.source_away_squad_name, a_s.squad_name)
+    )                                              as MATCH_NAME,
     f.cafc_fixture_id                               as CAFC_MATCH_ID,
     case when ii.cafc_fixture_id is not null
          then 'external' else 'internal' end         as DATA_SOURCE
 from fixtures f
 left join impect_identity ii  on ii.cafc_fixture_id = f.cafc_fixture_id
+left join manual_names    mn  on mn.cafc_fixture_id = f.cafc_fixture_id
 left join impect_match    im  on im.impect_match_id::varchar = ii.source_fixture_id
 left join squads          hs  on hs.cafc_squad_id   = f.home_squad_id
 left join squads          a_s on a_s.cafc_squad_id  = f.away_squad_id

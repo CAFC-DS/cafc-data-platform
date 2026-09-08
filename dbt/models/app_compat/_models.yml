@@ -37,6 +37,11 @@ models:
       - name: CAFC_MATCH_ID
         description: "Canonical surrogate (CAFC_FIXTURE_ID)."
       - name: DATA_SOURCE
+        description: "'external' (IMPECT identity) or 'internal' (manually-added)."
+      - name: HOMESQUADNAME
+        description: "For internal fixtures: the scout's entered name (FIXTURE_IDENTITIES.SOURCE_HOME_SQUAD_NAME), else the core_squads name. For external: core_squads."
+      - name: AWAYSQUADNAME
+        description: "See HOMESQUADNAME."
 
   # --------------------------------------------------------------------------
   # App-owned legacy passthroughs (formalised from hand-built views 2026-06-01).
