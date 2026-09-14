@@ -168,10 +168,10 @@ def fetch_new_external_players(
         NewExternalPlayer(
             source_system=source_system,
             source_player_id=str(row[0]),
-            source_name=row[1] or "",
+            source_name=(row[1] or "").strip(),
             source_birth_date=row[2],
-            source_first_name=row[3] or "",
-            source_last_name=row[4] or "",
+            source_first_name=(row[3] or "").strip(),
+            source_last_name=(row[4] or "").strip(),
         )
         for row in cur.fetchall()
     ]
