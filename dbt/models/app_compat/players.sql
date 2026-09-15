@@ -40,7 +40,8 @@ select
     c.cafc_player_id          as CAFC_PLAYER_ID,
     'internal'                as DATA_SOURCE
 from {{ source('core', 'PLAYERS') }} c
-where not exists (
+where coalesce(c.is_active, true)
+  and not exists (
     select 1
     from {{ ref('players_base') }} b
     where b.CAFC_PLAYER_ID = c.cafc_player_id

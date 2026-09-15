@@ -21,6 +21,10 @@
     (IMPECT id takes priority); merge.py collapses duplicate canonical ids so
     everything points at the one CAFC_PLAYER_ID.
 
+  Retired (IS_ACTIVE = FALSE) canonical players — the losing side of a
+  merge.py merge — are excluded here and in players.sql's live tail; this
+  view intentionally has no way to see them.
+
   Context columns (COMPETITIONNAME / SEASON / ITERATIONID / SQUADNAME / POSITION)
   come from the player's MOST-RECENT iteration (highest source_iteration_id) in
   core_player_iteration_kpis. NULL for players with no in-scope iteration data
@@ -36,6 +40,7 @@ with canonical as (
         cafc_player_id, display_name, first_name, last_name,
         birth_date, birth_place, strong_foot, current_squad_id
     from {{ source('core', 'PLAYERS') }}
+    where coalesce(is_active, true)
 ),
 
 -- Primary IMPECT identity per canonical player; presence => external.
