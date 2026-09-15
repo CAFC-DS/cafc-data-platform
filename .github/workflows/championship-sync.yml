@@ -10,7 +10,13 @@ name: EFL Championship sync (IMPECT + DVMS)
 #
 # Three jobs, gated on the same London-time check so a schedule firing at
 # either possible UTC hour only actually runs once:
-#   impect-championship - IMPECT match events for the Championship.
+#   impect-championship - IMPECT match events for the Championship, then
+#                          set-piece sub-phase data (corner/FK/throw-in type,
+#                          swing direction, first/second touch -- see
+#                          docs/set-pieces-endpoint-proposal.md) for the same
+#                          matches. Set-piece candidates come from matches
+#                          already in EVENTS, so this step must run after the
+#                          events sync within the same job.
 #   dvms-fixtures       - DVMS fixtures + small asset content (event data,
 #                          metadata, physical stats).
 #   dvms-positional     - raw Second Spectrum positional tracking
@@ -19,9 +25,10 @@ name: EFL Championship sync (IMPECT + DVMS)
 #                          already cataloged by that job -- see
 #                          load_dvms_positional.py's module docstring.
 #
-# All three underlying scripts are resumable. IMPECT replaces matches only
-# when its delta feed reports a recalculation; DVMS skips assets already
-# loaded or staged, so a slow or interrupted run resumes next firing.
+# All underlying scripts are resumable. IMPECT events replace matches only
+# when its delta feed reports a recalculation; set-piece and DVMS steps skip
+# rows/assets already loaded or staged, so a slow or interrupted run resumes
+# next firing.
 
 on:
   workflow_dispatch: {}
@@ -93,6 +100,22 @@ jobs:
         run: |
           export SNOWFLAKE_PRIVATE_KEY_PATH="$RUNNER_TEMP/snowflake_key.pem"
           python sync_championship_events.py
+
+      - name: Sync Championship set pieces
+        # Runs after match events: candidates come from matches already in
+        # EVENTS (CAFC_DB.IMPECT_RAW.SET_PIECES -- corner/FK/throw-in type,
+        # swing direction, first/second touch from GET /matches/{id}/set-pieces).
+        env:
+          IMPECT_USERNAME: ${{ secrets.IMPECT_USERNAME }}
+          IMPECT_PASSWORD: ${{ secrets.IMPECT_PASSWORD }}
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_DATABASE: CAFC_DB
+        run: |
+          export SNOWFLAKE_PRIVATE_KEY_PATH="$RUNNER_TEMP/snowflake_key.pem"
+          python sync_championship_set_pieces.py
 
   dvms-fixtures:
     needs: gate

@@ -11,5 +11,12 @@ REPO_ROOT=${SCRIPT_DIR:h:h:h}
 cd "$SCRIPT_DIR"
 source .env
 
+# SET_PIECES_ITERATION_IDS scopes the backfill (e.g. "2114" for Championship
+# 26/27); unset runs against every iteration present in EVENTS.
+iteration_flag=()
+if [[ -n "${SET_PIECES_ITERATION_IDS:-}" ]]; then
+  iteration_flag=(--iteration-ids "$SET_PIECES_ITERATION_IDS")
+fi
+
 exec "$REPO_ROOT/.venv/bin/python" -u load_set_pieces.py \
-  --backfill-events --pause-seconds 0.35 "$@"
+  --backfill-events --pause-seconds 0.35 "${iteration_flag[@]}" "$@"

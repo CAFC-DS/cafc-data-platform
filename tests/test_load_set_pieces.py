@@ -93,7 +93,7 @@ def test_fetch_and_load_uses_unwrapped_payload(monkeypatch):
 
 
 def test_backfill_continues_after_one_match_fails(monkeypatch, capsys):
-    monkeypatch.setattr(loader, "missing_set_piece_matches", lambda limit, lane=0, lanes=1: [(1, 10), (2, 10)])
+    monkeypatch.setattr(loader, "missing_set_piece_matches", lambda limit, lane=0, lanes=1, iteration_ids=None: [(1, 10), (2, 10)])
     loaded = []
 
     def fake_fetch(match_id, iteration_id, run_id=None, conn=None):
@@ -114,3 +114,45 @@ def test_backfill_continues_after_one_match_fails(monkeypatch, capsys):
     assert result == {"candidates": 2, "loaded": 1, "failed": 1}
     assert loaded == [(2, 10)]
     assert "lane 0/1 progress: 2/2 loaded=1 failed=1" in capsys.readouterr().out
+
+
+def test_missing_set_piece_matches_scopes_by_iteration_ids(monkeypatch):
+    executed = {}
+
+    class FakeCursor:
+        def execute(self, sql, params=None):
+            executed["sql"] = sql
+            executed["params"] = params
+
+        def fetchall(self):
+            return [(267839, 2114)]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(loader, "get_connection", lambda: FakeConnection())
+
+    result = loader.missing_set_piece_matches(iteration_ids={2114, 2227})
+
+    assert result == [(267839, 2114)]
+    assert "ITERATION_ID IN (2114, 2227)" in executed["sql"]
+
+
+def test_backfill_passes_iteration_ids_through(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(loader, "missing_set_piece_matches",
+                         lambda limit, lane=0, lanes=1, iteration_ids=None: captured.update(iteration_ids=iteration_ids) or [])
+
+    loader.backfill(limit=None, pause_seconds=0, dry_run=True, iteration_ids={2114})
+
+    assert captured["iteration_ids"] == {2114}

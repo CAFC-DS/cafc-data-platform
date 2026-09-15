@@ -209,8 +209,16 @@ def fetch_and_load(match_id: int, iteration_id: int | None, run_id: int | None =
         upsert(rows, conn=conn)
 
 
-def missing_set_piece_matches(limit: int | None = None, lane: int = 0, lanes: int = 1) -> list[tuple[int, int | None]]:
+def missing_set_piece_matches(limit: int | None = None, lane: int = 0, lanes: int = 1,
+                              iteration_ids: set[int] | None = None) -> list[tuple[int, int | None]]:
     """Matches in EVENTS with no SET_PIECES rows yet.
+
+    ``iteration_ids``, when given, scopes the candidate set to those
+    iterations (e.g. {2114} for Championship 26/27) -- mirrors
+    backfill_historical_match_events.py's --iteration-ids convention.
+    Without it, candidates span every iteration ever loaded into EVENTS
+    (~35k matches), which is the right scope for a full historical backfill
+    but far too broad for a scheduled/competition-scoped sync.
 
     Note: a match with genuinely zero set-piece phases (no corners, FKs,
     throw-ins or goal kicks -- vanishingly rare for a full match, but
@@ -225,12 +233,17 @@ def missing_set_piece_matches(limit: int | None = None, lane: int = 0, lanes: in
     conn = get_connection()
     try:
         with conn.cursor() as cur:
+            scope = ""
+            if iteration_ids:
+                ids = ", ".join(str(int(i)) for i in sorted(iteration_ids))
+                scope = f" AND e.ITERATION_ID IN ({ids})"
             sql = f"""
                 SELECT e.MATCH_ID, MAX(e.ITERATION_ID) ITERATION_ID
                 FROM CAFC_DB.IMPECT_RAW.EVENTS e
                 LEFT JOIN {TABLE} sp ON sp.MATCH_ID=e.MATCH_ID
                 WHERE sp.MATCH_ID IS NULL
                   AND MOD(e.MATCH_ID, %(lanes)s) = %(lane)s
+                  {scope}
                 GROUP BY e.MATCH_ID
                 ORDER BY e.MATCH_ID
             """
@@ -245,8 +258,8 @@ def missing_set_piece_matches(limit: int | None = None, lane: int = 0, lanes: in
 
 
 def backfill(*, limit: int | None, pause_seconds: float, dry_run: bool,
-             lane: int = 0, lanes: int = 1) -> dict[str, int]:
-    matches = missing_set_piece_matches(limit, lane=lane, lanes=lanes)
+             lane: int = 0, lanes: int = 1, iteration_ids: set[int] | None = None) -> dict[str, int]:
+    matches = missing_set_piece_matches(limit, lane=lane, lanes=lanes, iteration_ids=iteration_ids)
     if dry_run:
         return {"candidates": len(matches), "loaded": 0, "failed": 0}
     loaded = failed = 0
@@ -276,6 +289,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pause-seconds", type=float, default=0.35)
     parser.add_argument("--lane", type=int, default=0, help="Deterministic lane number (default: 0).")
     parser.add_argument("--lanes", type=int, default=1, help="Total parallel lanes (default: 1).")
+    parser.add_argument("--iteration-ids", type=str, default=None,
+                        help="Comma-separated iteration ids to scope the backfill to (default: all iterations in EVENTS).")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -284,5 +299,6 @@ if __name__ == "__main__":
     args = parse_args()
     if not args.backfill_events:
         raise SystemExit("Choose --backfill-events")
+    ids = {int(v) for v in args.iteration_ids.split(",")} if args.iteration_ids and args.iteration_ids.strip() else None
     print(backfill(limit=args.limit, pause_seconds=args.pause_seconds, dry_run=args.dry_run,
-                   lane=args.lane, lanes=args.lanes))
+                   lane=args.lane, lanes=args.lanes, iteration_ids=ids))
