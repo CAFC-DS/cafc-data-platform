@@ -6,7 +6,8 @@ import time
 import json
 import os
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlencode
 from typing import Optional, Dict, Any
 import config
@@ -150,6 +151,95 @@ DEFAULT_MAX_ATTEMPTS = 10
 MAX_429_SLEEP_SECONDS = 60
 
 
+# --- Adaptive cross-call rate-limit pacing -----------------------------------
+#
+# The per-call exponential backoff in make_request() only lives for the
+# duration of one call: every fresh call restarts at 1s and re-climbs the
+# 1 -> 2 -> 4 -> ... -> 60 ladder. Under sustained 429s (a multi-week
+# historical backfill against a per-token limit) that means every call
+# re-pays the ramp, and observed throughput collapses from ~200 matches/hr
+# to ~40 within a run.
+#
+# To stop that, keep a small process-wide "pace delay" that is slept BEFORE
+# each request, nudged up whenever the server returns 429 (honouring
+# Retry-After when the server sends it), and decayed back down on sustained
+# success. It converges just under the server's real limit so calls stop
+# tripping 429 at all. State is per-process -- each backfill lane is its own
+# process and converges independently; the lock only guards worker threads
+# within a single lane.
+_pace_lock = threading.Lock()
+_pace_delay = 0.0  # seconds slept before each request; adapts at runtime
+
+# The adaptive pre-request pace never grows past this; beyond it, a stuck
+# lane is better served by the per-call 429 backoff than by sleeping longer
+# on every single request.
+PACE_MAX_SECONDS = 20.0
+# Multiplicative decay applied to the pace on every successful response.
+PACE_DECAY = 0.85
+# On a 429 with no usable Retry-After, grow the pace by at least this, or by
+# PACE_BUMP_FACTOR, whichever is larger.
+PACE_BUMP_SECONDS = 0.5
+PACE_BUMP_FACTOR = 1.5
+# Optional hard floor from the environment so a deployment can pin a minimum
+# gap between requests without a code change (e.g.
+# IMPECT_MIN_REQUEST_INTERVAL=1.0). Defaults to 0 (no floor).
+try:
+    PACE_FLOOR_SECONDS = max(0.0, float(os.getenv("IMPECT_MIN_REQUEST_INTERVAL", "0")))
+except ValueError:
+    PACE_FLOOR_SECONDS = 0.0
+# Cap on how long a server-sent Retry-After will actually be honoured, so a
+# bogus or hostile header value can't park a lane for hours.
+MAX_RETRY_AFTER_SECONDS = 120.0
+
+
+def _current_pace() -> float:
+    """Current pre-request sleep, honouring the optional environment floor."""
+    with _pace_lock:
+        return max(_pace_delay, PACE_FLOOR_SECONDS)
+
+
+def _pace_on_success() -> None:
+    global _pace_delay
+    with _pace_lock:
+        _pace_delay *= PACE_DECAY
+        if _pace_delay < 0.01:
+            _pace_delay = 0.0
+
+
+def _pace_on_rate_limit(retry_after: Optional[float]) -> None:
+    global _pace_delay
+    with _pace_lock:
+        grown = max(_pace_delay * PACE_BUMP_FACTOR, _pace_delay + PACE_BUMP_SECONDS)
+        if retry_after is not None:
+            grown = max(grown, min(retry_after, MAX_RETRY_AFTER_SECONDS))
+        _pace_delay = min(grown, PACE_MAX_SECONDS)
+
+
+def _parse_retry_after(value: Optional[str]) -> Optional[float]:
+    """Parse a Retry-After header into seconds.
+
+    Accepts either an integer delta-seconds value or an HTTP-date. Returns
+    None when the header is absent or unparseable (caller then falls back to
+    its own exponential backoff).
+    """
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+
+
 def make_request(endpoint: str, params: Optional[Dict] = None,
                  max_attempts: int = DEFAULT_MAX_ATTEMPTS) -> Dict[str, Any]:
     """
@@ -180,6 +270,15 @@ def make_request(endpoint: str, params: Optional[Dict] = None,
         # Fetch headers INSIDE the loop so token refresh between retries
         # actually takes effect.
         headers = get_auth_headers()
+
+        # Proactive adaptive pacing: wait out the process-wide pace delay
+        # before spending a request, so we settle just under the server's
+        # rate limit instead of bursting into 429s and re-paying the
+        # per-call backoff ramp every time.
+        pace = _current_pace()
+        if pace:
+            time.sleep(pace)
+
         try:
             response = session.get(
                 url,
@@ -188,12 +287,21 @@ def make_request(endpoint: str, params: Optional[Dict] = None,
                 timeout=config.REQUEST_TIMEOUT,
             )
 
-            # Handle rate limiting (429 Too Many Requests) with exponential backoff.
+            # Handle rate limiting (429 Too Many Requests). Honour the
+            # server's Retry-After when present; otherwise fall back to this
+            # call's own exponential backoff. Either way, nudge the
+            # process-wide pace up so sibling calls slow down too.
             if response.status_code == 429:
-                sleep_s = min(rate_limit_backoff, MAX_429_SLEEP_SECONDS)
+                retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+                _pace_on_rate_limit(retry_after)
+                if retry_after is not None:
+                    sleep_s = min(retry_after, MAX_RETRY_AFTER_SECONDS)
+                else:
+                    sleep_s = min(rate_limit_backoff, MAX_429_SLEEP_SECONDS)
                 # Quieter logging: only print every 3rd 429 to avoid drowning the log.
                 if attempt % 3 == 0:
-                    print(f"  rate limit (429) on {endpoint}, waiting {sleep_s:.0f}s (attempt {attempt + 1}/{max_attempts})")
+                    print(f"  rate limit (429) on {endpoint}, waiting {sleep_s:.0f}s "
+                          f"(pace now {_current_pace():.1f}s, attempt {attempt + 1}/{max_attempts})")
                 time.sleep(sleep_s)
                 rate_limit_backoff *= 2
                 continue
@@ -218,7 +326,10 @@ def make_request(endpoint: str, params: Optional[Dict] = None,
                 )
 
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            # A clean response: let the process-wide pace decay back down.
+            _pace_on_success()
+            return data
 
         except requests.exceptions.RequestException as e:
             if attempt == max_attempts - 1:
@@ -290,6 +401,22 @@ def get_match_info(match_id: int, params: Optional[Dict] = None) -> Dict[str, An
         Match info payload
     """
     return make_request(f"/v5/customerapi/matches/{match_id}", params)
+
+
+def get_match_set_pieces(match_id: int, params: Optional[Dict] = None) -> Dict[str, Any]:
+    """
+    Get set-piece sub-phase data (corner/FK/throw-in type, swing direction,
+    first/second touch) for a specific match.
+
+    Args:
+        match_id: Match ID
+        params: Optional query parameters
+
+    Returns:
+        Set-piece phase payload (list of phase dicts, each with a nested
+        setPieceSubPhase array, under "data").
+    """
+    return make_request(f"/v5/customerapi/matches/{match_id}/set-pieces", params)
 
 
 def get_match_player_kpis(match_id: int, params: Optional[Dict] = None) -> Dict[str, Any]:
