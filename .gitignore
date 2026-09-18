@@ -20,6 +20,8 @@ env/
 # Large extracted data — keep on disk, don't commit
 python/extract/impect/*.csv
 python/extract/impect/downloads/
+python/extract/impect/backfill_logs/
+python/extract/impect/*_ids.txt
 
 # dbt
 dbt/target/
