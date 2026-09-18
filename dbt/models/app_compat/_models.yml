@@ -63,3 +63,93 @@ models:
 
   - name: users
     description: "Application users, app-owned. Passthrough of CORE.USERS."
+
+  - name: agent_profiles
+    description: "Agent contact profiles. App-owned passthrough."
+    columns:
+      - name: USER_ID
+        tests: [unique, not_null]
+
+  - name: notifications
+    description: "In-app user notifications. App-owned passthrough."
+    columns:
+      - name: ID
+        tests: [unique, not_null]
+
+  - name: password_reset_tokens
+    description: "Single-use password reset tokens. App-owned passthrough."
+    columns:
+      - name: ID
+        tests: [unique, not_null]
+
+  - name: player_information
+    description: "Supplementary per-player info captured in-app. App-owned; legacy carries only PLAYER_ID (IMPECT id), so this view ADDS CAFC_PLAYER_ID via the canonical resolution (not all rows resolve)."
+    columns:
+      - name: ID
+        tests: [unique, not_null]
+
+  - name: player_list_flags
+    description: "Shared favourite/decision markers on a player, keyed by UNIVERSAL_ID text. App-owned passthrough."
+    columns:
+      - name: UNIVERSAL_ID
+        tests: [unique, not_null]
+
+  - name: player_list_items
+    description: "Shortlist members. App-owned passthrough; carries PLAYER_ID + CAFC_PLAYER_ID, but CAFC_PLAYER_ID is NULL on ~2,850 rows (unresolved identity) as of 2026-09-18 — not the 100%-populated dual-id this view's original description implied."
+    columns:
+      - name: ID
+        tests: [unique, not_null]
+
+  - name: player_lists
+    description: "User-defined player shortlists. App-owned passthrough."
+    columns:
+      - name: ID
+        tests: [unique, not_null]
+
+  - name: player_notes
+    description: "Free-text player notes. App-owned; legacy carries only PLAYER_ID (IMPECT id), so this view ADDS CAFC_PLAYER_ID via the canonical resolution (not all rows resolve)."
+    columns:
+      - name: ID
+        tests: [unique, not_null]
+
+  - name: player_recommendations
+    description: "Player recommendations workflow. App-owned passthrough."
+    columns:
+      - name: ID
+        tests: [unique, not_null]
+
+  - name: player_stage_history
+    description: "Recruitment-stage transitions per player. App-owned; legacy carries only PLAYER_ID (IMPECT id), so this view ADDS CAFC_PLAYER_ID via the canonical resolution. ~99.6% of PLAYER_IDs resolve; the rest (manual/stale players) get a NULL CAFC_PLAYER_ID."
+    columns:
+      - name: ID
+        tests: [unique, not_null]
+
+  - name: recommendation_notes_history
+    description: "Append-only history of notes left on a recommendation. App-owned passthrough."
+    columns:
+      - name: ID
+        tests: [unique, not_null]
+
+  - name: scout_assignments
+    description: "Scout assignment headers. App-owned passthrough."
+    columns:
+      - name: ID
+        tests: [unique, not_null]
+
+  - name: scout_assignment_audit
+    description: "Scout assignment audit trail. App-owned passthrough."
+    columns:
+      - name: ID
+        tests: [unique, not_null]
+
+  - name: scout_assignment_players
+    description: "Players within a scout assignment. App-owned passthrough."
+    columns:
+      - name: ID
+        tests: [unique, not_null]
+
+  - name: shared_report_links
+    description: "Shareable scout-report links. App-owned passthrough."
+    columns:
+      - name: ID
+        tests: [unique, not_null]
