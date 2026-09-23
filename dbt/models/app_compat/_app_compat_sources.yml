@@ -91,13 +91,5 @@ sources:
         description: "Supplementary per-player info captured in-app. Legacy PLAYER_ID only."
       - name: AGENT_PROFILES
         description: "Agent contact profiles."
-      - name: NOTIFICATIONS
-        description: "In-app user notifications."
       - name: STATUS_HISTORY
         description: "Generic status-change audit."
-      - name: SCOUT_ASSIGNMENTS
-        description: "Scout assignment headers."
-      - name: SCOUT_ASSIGNMENT_AUDIT
-        description: "Scout assignment audit trail."
-      - name: SCOUT_ASSIGNMENT_PLAYERS
-        description: "Players within a scout assignment."

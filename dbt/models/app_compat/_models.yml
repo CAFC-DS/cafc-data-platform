@@ -70,12 +70,6 @@ models:
       - name: USER_ID
         tests: [unique, not_null]
 
-  - name: notifications
-    description: "In-app user notifications. App-owned passthrough."
-    columns:
-      - name: ID
-        tests: [unique, not_null]
-
   - name: password_reset_tokens
     description: "Single-use password reset tokens. App-owned passthrough."
     columns:
@@ -126,24 +120,6 @@ models:
 
   - name: recommendation_notes_history
     description: "Append-only history of notes left on a recommendation. App-owned passthrough."
-    columns:
-      - name: ID
-        tests: [unique, not_null]
-
-  - name: scout_assignments
-    description: "Scout assignment headers. App-owned passthrough."
-    columns:
-      - name: ID
-        tests: [unique, not_null]
-
-  - name: scout_assignment_audit
-    description: "Scout assignment audit trail. App-owned passthrough."
-    columns:
-      - name: ID
-        tests: [unique, not_null]
-
-  - name: scout_assignment_players
-    description: "Players within a scout assignment. App-owned passthrough."
     columns:
       - name: ID
         tests: [unique, not_null]
