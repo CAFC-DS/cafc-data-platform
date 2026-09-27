@@ -23,8 +23,19 @@
       only if that's absent. Squad id/type/country still come from
       core_squads via the (repaired) home/away_squad_id.
 
-  Stays a view: the metadata join is over ~145k fixtures, not the big fact
+  Stays a view: the metadata join is over ~177k fixtures, not the big fact
   tables.
+
+  The six always-NULL *_skill_corner_id/_heim_spiel_id/_wyscout_id columns
+  exist only for shape parity with the legacy MATCHES contract (which never
+  populated per-squad cross-provider ids either) - no CORE-native consumer
+  needs them; candidates for removal once app_compat.matches retires.
+
+  source_fixture_id isn't strictly unique: ~114 rows (2026-09-27) share a
+  source_fixture_id with another cafc_fixture_id (max fan-out 3) - a
+  pre-existing duplication in FIXTURE_IDENTITIES inherited from the shared
+  join logic, not introduced here; app_compat.matches has the identical
+  issue today, untested until this model's warn-severity test surfaced it.
 */
 
 {{ config(materialized='view') }}
@@ -90,11 +101,11 @@ select
     f.cafc_fixture_id                                     as cafc_fixture_id,
     ii.source_fixture_id                                  as source_fixture_id,
     im.skill_corner_id                                    as skill_corner_id,
-    im.heim_spiel_id                                       as heim_spiel_id,
-    im.wyscout_id                                          as wyscout_id,
-    im.iteration_id                                        as iteration_id,
-    im.matchday_index                                      as matchday_index,
-    im.matchday_name                                       as matchday_name,
+    im.heim_spiel_id                                      as heim_spiel_id,
+    im.wyscout_id                                         as wyscout_id,
+    im.iteration_id                                       as iteration_id,
+    im.matchday_index                                     as matchday_index,
+    im.matchday_name                                      as matchday_name,
 
     -- Home squad denormalisation
     f.home_squad_id                                        as home_squad_id,
@@ -116,7 +127,7 @@ select
     null::number(38,0)                                     as away_squad_heim_spiel_id,
     null::number(38,0)                                     as away_squad_wyscout_id,
 
-    coalesce(im.scheduled_at, f.fixture_date)              as scheduled_date,
+    coalesce(im.scheduled_at, f.fixture_date)              as scheduled_at,
     im.last_calculation_at                                 as last_calculation_at,
     im.is_available                                        as is_available,
     concat(

@@ -2,7 +2,9 @@ version: 2
 
 # ============================================================================
 # Canonical dimensions: one row per logical entity (squad, competition,
-# season). Built nightly from staging. Materialized as tables for fast joins.
+# season, fixture). Built nightly from staging. Most are materialized as
+# tables for fast joins; bridge/denormalisation views (core_*_id_resolutions,
+# core_fixture_details) stay views so they're always current.
 # ============================================================================
 
 models:
@@ -52,9 +54,13 @@ models:
       - name: cafc_fixture_id
         tests: [unique, not_null]
       - name: source_fixture_id
-        description: "Primary IMPECT match id. NULL for internal (manually-added) fixtures."
+        description: "Primary IMPECT match id. NULL for internal (manually-added) fixtures. Not strictly unique: ~114 rows (2026-09-27) share a source_fixture_id with another cafc_fixture_id (max fan-out 3) - a pre-existing duplication in FIXTURE_IDENTITIES this model inherits, not introduced by it; app_compat.matches has the identical issue, untested. Warn-severity test surfaces it without blocking builds."
+        tests:
+          - unique:
+              config:
+                severity: warn
       - name: home_squad_name
-        description: "Scout's own entry for manually-added fixtures (FIXTURE_IDENTITIES.SOURCE_HOME_SQUAD_NAME), else the core_squads name."
+        description: "Scout's own entry for manually-added fixtures (FIXTURE_IDENTITIES.SOURCE_HOME_SQUAD_NAME), else the core_squads name. No not_null test: a residual of legacy free-text fixtures with no resolvable squad id can leave this NULL, matching app_compat.matches' existing behaviour — not an oversight."
       - name: away_squad_name
         description: "See home_squad_name."
       - name: data_source
