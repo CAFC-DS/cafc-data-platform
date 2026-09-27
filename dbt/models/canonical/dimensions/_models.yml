@@ -45,3 +45,18 @@ models:
                 field: cafc_competition_id
       - name: season_name
         tests: [not_null]
+
+  - name: core_fixture_details
+    description: "Denormalised fixture view: one row per canonical fixture, squad names/countries resolved, IMPECT match metadata joined in. Built for Phase 6 sub-project 4 as the CORE-native twin of app_compat/matches.sql (canonical column names, same join logic)."
+    columns:
+      - name: cafc_fixture_id
+        tests: [unique, not_null]
+      - name: source_fixture_id
+        description: "Primary IMPECT match id. NULL for internal (manually-added) fixtures."
+      - name: home_squad_name
+        description: "Scout's own entry for manually-added fixtures (FIXTURE_IDENTITIES.SOURCE_HOME_SQUAD_NAME), else the core_squads name."
+      - name: away_squad_name
+        description: "See home_squad_name."
+      - name: data_source
+        description: "'external' (has IMPECT identity) or 'internal' (manually-added)."
+        tests: [not_null]
