@@ -1,0 +1,14 @@
+# Run-to-completion IMPECT event backfill (Railway). Set BACKFILL_ITERATION_IDS
+# and the Snowflake/IMPECT credentials as service variables; the container exits
+# 0 once the scoped queue is drained. Build with RAILWAY_DOCKERFILE_PATH=Dockerfile.backfill.
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY python/extract/impect/requirements.txt ./requirements.txt
+# write_pandas needs the connector's pandas extra (pyarrow), which requirements.txt omits.
+RUN pip install --no-cache-dir -r requirements.txt "snowflake-connector-python[pandas]" "cryptography>=42.0.0"
+
+COPY python/extract/impect/ ./
+
+CMD ["python", "-u", "railway_backfill.py"]
