@@ -56,12 +56,17 @@ The target database and schema come from three environment variables
 (`CANONICAL_DB`, `PLATFORM_DB_SCHEMA`, `CORE_DB_SCHEMA`). If they are unset, the
 code falls back to the **old** database, `RECRUITMENT_TEST.PUBLIC`.
 
-> **(unverified) Check this.** The Railway service's variable list (names only;
-> Railway hides values) does **not** contain `CANONICAL_DB`, `PLATFORM_DB_SCHEMA`
-> or `CORE_DB_SCHEMA`. If they really are unset, the helpers above resolve to
-> `RECRUITMENT_TEST.PUBLIC`, not `CAFC_DB`. Look at `SNOWFLAKE_DATABASE` and
-> `SNOWFLAKE_SCHEMA` on Railway, and at the "Canonical seam: READ_PREFIX=..." line
-> in the service's startup log, to see what production is actually using.
+> **Which Railway service is which** (checked 2026-09-30, project `cheerful-healing`):
+>
+> | Service | Deploys from | Seam vars set? | Meaning |
+> |---|---|---|---|
+> | `dependable-adventure` | branch `cutover/full` | Yes (`CANONICAL_DB`, `PLATFORM_DB_SCHEMA`, `CORE_DB_SCHEMA`; no `WRITE_DB`) | The app running on `CAFC_DB` |
+> | `cafc-recruitment-platform` | branch `main` | No | The old app on `RECRUITMENT_TEST.PUBLIC` |
+>
+> Railway hides variable values, so the exact values are **(unverified)**; the
+> startup log line "Canonical seam: READ_PREFIX=... WRITE_PREFIX=..." shows them.
+> `cutover/full` is `main` plus a handful of feature fixes, so the code state in
+> section 4 is the same on both.
 
 ## 4. Where the migration stands
 
