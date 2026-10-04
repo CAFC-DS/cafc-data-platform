@@ -134,12 +134,55 @@ The service exits 0 when the scope is drained or a budget is reached (restart po
 `ON_FAILURE` leaves it stopped), and 1 if it cannot make progress for
 `BACKFILL_MAX_STALLED_MINUTES` (default 120).
 
+### Staged plan: season blocks, newest first, by geographic group
+
+`python/extract/impect/backfill_plans/five_seasons_men.json` splits the queue into **5 season
+blocks** (`26/27+2026`, `25/26+2025`, `24/25+2024`, `23/24+2023`, `22/23+2022`; each pairs a
+split-year season with its calendar-year twin), and each block into **11 geographic groups**
+(Nordics & Baltics, British Isles, Germany/Austria/Switzerland, Western Europe, Southern Europe,
+Central & Eastern Europe/Balkans/Turkey, North & Central America, South America, Asia/Middle East/Oceania,
+Africa, International & continental). The group definitions live in `backfill_plan.py`.
+
+| Variable | Meaning |
+|---|---|
+| `BACKFILL_PLAN` | `backfill_plans/five_seasons_men.json` (relative to `python/extract/impect/`) |
+| `BACKFILL_BLOCKS` | Only these blocks, e.g. `26/27+2026`; unset runs every block in order |
+| `BACKFILL_DRY_RUN=1` | Print each stage's live counts and exit without starting workers |
+
+Stages run in order. A finished stage costs only a count query, an unfinished one resumes from the
+queue, and a stalled stage is reported but does not stop later stages (the run then exits 1).
+Every Snowflake session carries `...;block=<block>;group=<group>`, so credits can be reported per stage:
+
+```sql
+SELECT QUERY_TAG, COUNT(*) AS statements, SUM(CREDITS_ATTRIBUTED_COMPUTE) AS credits
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+WHERE START_TIME >= DATEADD(day, -3, CURRENT_TIMESTAMP()) AND QUERY_TAG LIKE 'project=cafc-data-platform;job=impect-backfill;block=%'
+GROUP BY 1 ORDER BY 1;
+```
+
+Regenerate the plan with `python backfill_plan.py --write backfill_plans/five_seasons_men.json`
+(read-only; it adds iterations that appeared since). The plan lists iteration ids only; what is left to do
+is always read from the queue.
+
+**Before running a season that is still being played**, add its newly completed matches (and any new
+iterations) to the queue. This is queue-only and does not touch `MATCHES`/`SQUADS`/`PLAYERS`; run it as a
+developer role, not `BACKFILL_ROLE`:
+
+```bash
+python refresh_backfill_queue.py --seasons 26/27,2026            # dry run
+python refresh_backfill_queue.py --seasons 26/27,2026 --apply
+```
+
+Run one block per deployment, check the block's logs and credits, then move `BACKFILL_BLOCKS` to the next.
+
 Operational notes:
 
 - The Railway service rebuilds on pushes that touch `Dockerfile.backfill` or
   `python/extract/impect/**`. A push redeploys, and so starts, the service with whatever
   variables are currently set. Update the variables (or stop the service) before pushing.
 - A redeploy now hands claims back (SIGTERM) instead of stranding them.
+- The supervisor logs in to IMPECT once before starting workers, and the login is single-flight and retried,
+  so workers starting together no longer race for a token.
 - Matches whose events endpoint returns 404 are marked `FAILED` with a 12 h cooldown and
   stop after 5 attempts; they are reported but never block the exit.
 - The queue is the source of truth. `python backfill_historical_match_events.py --status`

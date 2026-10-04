@@ -4,12 +4,16 @@ Runs N worker processes of backfill_historical_match_events.py over a scope of
 iterations and exits when nothing in that scope can still be done, so a
 run-to-completion service stops billing when the work is finished.
 
-Scope (at least one is required, both may be given):
-  BACKFILL_ITERATION_IDS   comma-separated IMPECT iteration ids
-  BACKFILL_SEASONS         comma-separated queue SEASON labels, e.g. "25/26,2025"
+Scope (one of these):
+  BACKFILL_PLAN            path to a staged plan (see backfill_plan.py): season blocks,
+                           newest first, each split by geographic group, run in order
+  BACKFILL_BLOCKS          with a plan, only these block labels, e.g. "26/27+2026"
+  BACKFILL_ITERATION_IDS   comma-separated IMPECT iteration ids (single scope)
+  BACKFILL_SEASONS         comma-separated queue SEASON labels (single scope), e.g. "25/26,2025"
+  BACKFILL_DRY_RUN=1       print each stage's live counts and exit without starting workers
 
 Exit codes: 0 when the scope is drained, or a match/time budget was reached;
-1 when it cannot progress (stalled) or the configuration is wrong.
+1 when a stage cannot progress (stalled; later stages still run) or the configuration is wrong.
 
 "Drained" means no row is left that a worker could still claim.  Matches in a
 FAILED cooldown, or whose attempts are used up, are reported but do not keep
@@ -23,12 +27,12 @@ Env (defaults in brackets):
   BACKFILL_LOAD_MATCHES [10]         matches staged per INSERT ... SELECT
   BACKFILL_FETCH_WORKERS [3]         concurrent IMPECT fetch threads per worker
   BACKFILL_MAX_ATTEMPTS [5]          per-match attempt cap
-  BACKFILL_MAX_MATCHES               stop after about this many matches (budget)
+  BACKFILL_MAX_MATCHES               stop after about this many matches (budget, across all stages)
   BACKFILL_MAX_MINUTES               claim no new batch after this many minutes
   BACKFILL_STALE_CLAIM_MINUTES [90]  claims older than this are handed back
   BACKFILL_MAX_STALLED_MINUTES [120] give up after this long with no progress
   BACKFILL_IDLE_POLL_SECONDS [300]   wait between checks while nothing is claimable
-  BACKFILL_QUERY_TAG                 QUERY_TAG for every Snowflake session
+  BACKFILL_QUERY_TAG                 base QUERY_TAG; plan stages append ;block=...;group=...
   SNOWFLAKE_*, IMPECT_USERNAME, IMPECT_PASSWORD
 """
 from __future__ import annotations
@@ -46,6 +50,7 @@ from cryptography.hazmat.primitives.serialization import (
     Encoding, NoEncryption, PrivateFormat, load_pem_private_key,
 )
 
+import backfill_plan
 import snowflake_loader
 
 QUEUE_TABLE = "CAFC_DB.CORE.IMPECT_EVENT_BACKFILL_QUEUE"
@@ -189,34 +194,173 @@ def _stop_workers(procs: list[subprocess.Popen], grace_seconds: int = 20) -> Non
             proc.kill()
 
 
+class _Settings:
+    """Run settings read once from the environment."""
+
+    def __init__(self) -> None:
+        self.workers = _env_int("BACKFILL_WORKERS", 2)
+        self.batch_size = _env_int("BACKFILL_BATCH_SIZE", 25)
+        self.load_matches = _env_int("BACKFILL_LOAD_MATCHES", 10)
+        self.fetch_workers = _env_int("BACKFILL_FETCH_WORKERS", 3)
+        self.max_attempts = _env_int("BACKFILL_MAX_ATTEMPTS", 5)
+        self.stale_minutes = _env_int("BACKFILL_STALE_CLAIM_MINUTES", 90)
+        self.max_stalled_minutes = _env_int("BACKFILL_MAX_STALLED_MINUTES", 120)
+        self.idle_poll_seconds = _env_int("BACKFILL_IDLE_POLL_SECONDS", 300)
+        self.base_tag = os.environ.get("BACKFILL_QUERY_TAG") or DEFAULT_QUERY_TAG
+        self.dry_run = os.environ.get("BACKFILL_DRY_RUN", "").lower() in ("1", "true", "yes")
+
+
+class _Budget:
+    """Match and wall-clock budget shared by every stage of a run."""
+
+    def __init__(self, max_matches: int | None, max_minutes: int | None) -> None:
+        self.max_matches = max_matches
+        self.deadline = time.monotonic() + max_minutes * 60 if max_minutes else None
+        self.done = 0  # matches finished by this run in stages that have ended
+
+    def matches_exhausted(self, in_stage: int = 0) -> bool:
+        return self.max_matches is not None and self.done + in_stage >= self.max_matches
+
+    def time_exhausted(self) -> bool:
+        return self.deadline is not None and time.monotonic() >= self.deadline
+
+    def matches_left(self, in_stage: int = 0) -> int | None:
+        return None if self.max_matches is None else self.max_matches - self.done - in_stage
+
+
+def _prefetch_token() -> None:
+    """Log in to IMPECT once here so workers start with a cached token.
+
+    Several processes (and their fetch threads) all finding the cache empty and
+    logging in at the same moment is what produced a 401 on the first batch.
+    A failure here is not fatal: the workers retry the login themselves.
+    """
+    try:
+        import impect_api
+        impect_api.get_auth_token()
+    except Exception as exc:  # noqa: BLE001
+        print(f"warning: could not prefetch an IMPECT token ({exc}); workers will log in themselves", flush=True)
+
+
+def _run_scope(label: str, iteration_ids: list[int], cfg: _Settings, budget: _Budget,
+               query_tag: str, procs: list[subprocess.Popen]) -> str:
+    """Run workers over one scope until it is drained.
+
+    Returns "complete", "budget" (match or time budget reached) or "stalled".
+    """
+    ids_arg = ",".join(str(value) for value in iteration_ids)
+    counts = scope_counts(iteration_ids, cfg.max_attempts)
+    done_at_start = counts["done"]
+    last_progress = time.monotonic()
+    print(f"{label}: start, {len(iteration_ids)} iterations, {counts}", flush=True)
+
+    def finish() -> None:
+        budget.done += counts["done"] - done_at_start
+
+    round_no = 0
+    while True:
+        released = release_stale_claims(iteration_ids, cfg.stale_minutes)
+        if released:
+            print(f"{label}: released {released} stale claim(s)", flush=True)
+            counts = scope_counts(iteration_ids, cfg.max_attempts)
+
+        if counts["remaining"] == 0:
+            print(f"{label}: complete {counts}", flush=True)
+            finish()
+            return "complete"
+        done_this_stage = counts["done"] - done_at_start
+        if budget.matches_exhausted(done_this_stage):
+            print(f"{label}: match budget reached ({budget.done + done_this_stage} >= {budget.max_matches}): {counts}",
+                  flush=True)
+            finish()
+            return "budget"
+        if budget.time_exhausted():
+            print(f"{label}: time budget reached: {counts}", flush=True)
+            finish()
+            return "budget"
+
+        round_no += 1
+        command = [
+            sys.executable, "-u", os.path.abspath(__file__), "--worker",
+            "--process", "--until-empty", "--batch-size", str(cfg.batch_size),
+            "--max-attempts", str(cfg.max_attempts), "--iteration-ids", ids_arg,
+            "--load-matches", str(cfg.load_matches), "--fetch-workers", str(cfg.fetch_workers),
+            "--query-tag", query_tag,
+        ]
+        left = budget.matches_left(done_this_stage)
+        if left is not None:
+            command += ["--max-matches", str(math.ceil(left / cfg.workers))]
+        if budget.deadline is not None:
+            command += ["--stop-after-minutes", f"{max(0.1, (budget.deadline - time.monotonic()) / 60):.2f}"]
+        procs[:] = [subprocess.Popen(command) for _ in range(cfg.workers)]
+        for proc in procs:
+            proc.wait()
+
+        previous_done = counts["done"]
+        counts = scope_counts(iteration_ids, cfg.max_attempts)
+        progressed = counts["done"] > previous_done
+        if progressed:
+            last_progress = time.monotonic()
+        print(f"{label}: round {round_no}: {counts} (+{counts['done'] - previous_done})", flush=True)
+        if counts["remaining"] == 0:
+            continue  # re-checked (and reported) at the top of the loop
+        stalled_minutes = (time.monotonic() - last_progress) / 60
+        if stalled_minutes >= cfg.max_stalled_minutes:
+            print(f"{label}: no progress for {stalled_minutes:.0f} minutes with {counts['remaining']} remaining; "
+                  "giving up on this scope", flush=True)
+            finish()
+            return "stalled"
+        if not progressed:
+            # Nothing claimable right now (rows held by another runner or cooling down):
+            # wait with the warehouse suspended rather than polling every minute.
+            time.sleep(cfg.idle_poll_seconds)
+
+
+def _build_stages(cfg: _Settings) -> list[dict]:
+    """The ordered scopes to run: plan stages, or one stage from the id/season variables."""
+    plan_path = os.environ.get("BACKFILL_PLAN")
+    if plan_path:
+        if not os.path.isabs(plan_path):
+            plan_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), plan_path)
+        plan = backfill_plan.load_plan(plan_path)
+        blocks = _csv(os.environ.get("BACKFILL_BLOCKS")) or None
+        stages = backfill_plan.select_stages(plan, blocks)
+        return [{"label": f"[{stage['block']} | {stage['group']}]", "iteration_ids": stage["iteration_ids"],
+                 "tag": f"{cfg.base_tag};block={stage['block']};group={stage['group']}"}
+                for stage in stages]
+    iteration_ids = resolve_scope()
+    return [{"label": "[scope]", "iteration_ids": iteration_ids, "tag": cfg.base_tag}] if iteration_ids else []
+
+
 def supervise() -> int:
     missing = [name for name in REQUIRED_ENV if not os.environ.get(name)]
-    if not (os.environ.get("BACKFILL_ITERATION_IDS") or os.environ.get("BACKFILL_SEASONS")):
-        missing.append("BACKFILL_ITERATION_IDS or BACKFILL_SEASONS")
+    if not (os.environ.get("BACKFILL_PLAN") or os.environ.get("BACKFILL_ITERATION_IDS")
+            or os.environ.get("BACKFILL_SEASONS")):
+        missing.append("BACKFILL_PLAN, BACKFILL_ITERATION_IDS or BACKFILL_SEASONS")
     if missing:
         print(f"missing required env vars: {', '.join(missing)}", flush=True)
         return 1
 
-    os.environ.setdefault("SNOWFLAKE_QUERY_TAG", os.environ.get("BACKFILL_QUERY_TAG") or DEFAULT_QUERY_TAG)
-    workers = _env_int("BACKFILL_WORKERS", 2)
-    batch_size = _env_int("BACKFILL_BATCH_SIZE", 25)
-    load_matches = _env_int("BACKFILL_LOAD_MATCHES", 10)
-    fetch_workers = _env_int("BACKFILL_FETCH_WORKERS", 3)
-    max_attempts = _env_int("BACKFILL_MAX_ATTEMPTS", 5)
-    stale_minutes = _env_int("BACKFILL_STALE_CLAIM_MINUTES", 90)
-    max_stalled_minutes = _env_int("BACKFILL_MAX_STALLED_MINUTES", 120)
-    idle_poll_seconds = _env_int("BACKFILL_IDLE_POLL_SECONDS", 300)
-    max_matches = _env_optional_int("BACKFILL_MAX_MATCHES")
-    max_minutes = _env_optional_int("BACKFILL_MAX_MINUTES")
-
-    iteration_ids = resolve_scope()
-    if not iteration_ids:
+    cfg = _Settings()
+    os.environ.setdefault("SNOWFLAKE_QUERY_TAG", cfg.base_tag)
+    try:
+        stages = _build_stages(cfg)
+    except (OSError, ValueError) as exc:
+        print(f"could not build the stage list: {exc}", flush=True)
+        return 1
+    if not stages:
         print("scope resolved to no iterations; nothing to do", flush=True)
         return 1
-    ids_arg = ",".join(str(value) for value in iteration_ids)
 
-    started = time.monotonic()
-    deadline = started + max_minutes * 60 if max_minutes else None
+    if cfg.dry_run:
+        for index, stage in enumerate(stages, 1):
+            counts = scope_counts(stage["iteration_ids"], cfg.max_attempts)
+            print(f"stage {index}/{len(stages)} {stage['label']}: {len(stage['iteration_ids'])} iterations, {counts}",
+                  flush=True)
+        print("dry run: no workers started", flush=True)
+        return 0
+
+    budget = _Budget(_env_optional_int("BACKFILL_MAX_MATCHES"), _env_optional_int("BACKFILL_MAX_MINUTES"))
     procs: list[subprocess.Popen] = []
 
     def _on_sigterm(signum, _frame):
@@ -224,62 +368,22 @@ def supervise() -> int:
         sys.exit(128 + signum)
 
     signal.signal(signal.SIGTERM, _on_sigterm)
+    _prefetch_token()
 
-    counts = scope_counts(iteration_ids, max_attempts)
-    done_at_start = counts["done"]
-    last_progress = time.monotonic()
-    print(f"start: {len(iteration_ids)} iterations, {counts}", flush=True)
-
-    round_no = 0
-    while True:
-        released = release_stale_claims(iteration_ids, stale_minutes)
-        if released:
-            print(f"released {released} stale claim(s)", flush=True)
-            counts = scope_counts(iteration_ids, max_attempts)
-
-        if counts["remaining"] == 0:
-            print(f"backfill complete: {counts}", flush=True)
-            return 0
-        done_this_run = counts["done"] - done_at_start
-        if max_matches is not None and done_this_run >= max_matches:
-            print(f"match budget reached ({done_this_run} >= {max_matches}): {counts}", flush=True)
-            return 0
-        if deadline is not None and time.monotonic() >= deadline:
-            print(f"time budget reached: {counts}", flush=True)
-            return 0
-
-        round_no += 1
-        command = [
-            sys.executable, "-u", os.path.abspath(__file__), "--worker",
-            "--process", "--until-empty", "--batch-size", str(batch_size),
-            "--max-attempts", str(max_attempts), "--iteration-ids", ids_arg,
-            "--load-matches", str(load_matches), "--fetch-workers", str(fetch_workers),
-        ]
-        if max_matches is not None:
-            command += ["--max-matches", str(math.ceil((max_matches - done_this_run) / workers))]
-        if deadline is not None:
-            command += ["--stop-after-minutes", f"{max(0.1, (deadline - time.monotonic()) / 60):.2f}"]
-        procs = [subprocess.Popen(command) for _ in range(workers)]
-        for proc in procs:
-            proc.wait()
-
-        previous_done = counts["done"]
-        counts = scope_counts(iteration_ids, max_attempts)
-        progressed = counts["done"] > previous_done
-        if progressed:
-            last_progress = time.monotonic()
-        print(f"round {round_no}: {counts} (+{counts['done'] - previous_done})", flush=True)
-        if counts["remaining"] == 0:
-            continue  # re-checked (and reported) at the top of the loop
-        stalled_minutes = (time.monotonic() - last_progress) / 60
-        if stalled_minutes >= max_stalled_minutes:
-            print(f"no progress for {stalled_minutes:.0f} minutes with {counts['remaining']} remaining; giving up",
-                  flush=True)
-            return 1
-        if not progressed:
-            # Nothing claimable right now (rows held by another runner or cooling down):
-            # wait with the warehouse suspended rather than polling every minute.
-            time.sleep(idle_poll_seconds)
+    stalled: list[str] = []
+    for index, stage in enumerate(stages, 1):
+        print(f"stage {index}/{len(stages)} {stage['label']}", flush=True)
+        outcome = _run_scope(stage["label"], stage["iteration_ids"], cfg, budget, stage["tag"], procs)
+        if outcome == "budget":
+            print(f"stopping after stage {index}/{len(stages)}: budget reached", flush=True)
+            return 1 if stalled else 0
+        if outcome == "stalled":
+            stalled.append(stage["label"])
+    if stalled:
+        print(f"finished, but {len(stalled)} stage(s) stalled: {', '.join(stalled)}", flush=True)
+        return 1
+    print(f"all {len(stages)} stage(s) complete; {budget.done} matches finished this run", flush=True)
+    return 0
 
 
 if __name__ == "__main__":

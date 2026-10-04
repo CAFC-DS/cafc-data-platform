@@ -319,13 +319,15 @@ def supervisor(monkeypatch):
     for name in rb.REQUIRED_ENV:
         monkeypatch.setenv(name, "x")
     for name in ("BACKFILL_ITERATION_IDS", "BACKFILL_SEASONS", "BACKFILL_MAX_MATCHES", "BACKFILL_MAX_MINUTES",
-                 "BACKFILL_MAX_STALLED_MINUTES", "BACKFILL_WORKERS"):
+                 "BACKFILL_MAX_STALLED_MINUTES", "BACKFILL_WORKERS", "BACKFILL_PLAN", "BACKFILL_BLOCKS",
+                 "BACKFILL_DRY_RUN", "BACKFILL_QUERY_TAG"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("BACKFILL_ITERATION_IDS", "10,20")
     monkeypatch.setattr(rb, "release_stale_claims", lambda ids, minutes: 0)
     monkeypatch.setattr(rb.subprocess, "Popen", FakeProc)
     monkeypatch.setattr(rb.time, "sleep", lambda s: None)
     monkeypatch.setattr(rb.signal, "signal", lambda *a, **k: None)
+    monkeypatch.setattr(rb, "_prefetch_token", lambda: None)
 
     def script(sequence):
         iterator = iter(sequence)
