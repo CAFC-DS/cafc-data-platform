@@ -14,6 +14,9 @@ import sys
 import time
 from typing import Any
 
+import pandas as pd
+from snowflake.connector.pandas_tools import write_pandas
+
 import impect_api as api
 from snowflake_loader import get_connection
 
@@ -100,15 +103,102 @@ def upsert(row: dict[str, Any], conn=None) -> None:
             conn.close()
 
 
-def fetch_and_load(match_id: int, iteration_id: int | None, run_id: int | None = None, conn=None) -> None:
+def fetch_row(match_id: int, iteration_id: int | None, run_id: int | None = None) -> dict[str, Any]:
+    """Fetch GET /matches/{id} and shape it into a MATCH_INFO row (no database access)."""
     payload = _payload(api.get_match_info(match_id))
     if not payload:
         raise RuntimeError(f"Empty match-info payload for match {match_id}")
-    row = payload_row(payload, match_id, iteration_id, run_id)
+    return payload_row(payload, match_id, iteration_id, run_id)
+
+
+def fetch_and_load(match_id: int, iteration_id: int | None, run_id: int | None = None, conn=None) -> None:
+    row = fetch_row(match_id, iteration_id, run_id)
     if conn is None:
         upsert(row)
     else:
         upsert(row, conn=conn)
+
+
+_STAGE_TABLE = "MATCH_INFO_LOAD_STAGE"
+_STAGE_COLUMNS = (
+    "MATCH_ID", "ITERATION_ID", "MATCH_DATETIME", "LAST_CALCULATION", "HOME_SQUAD_ID",
+    "AWAY_SQUAD_ID", "HOME_PLAYERS", "AWAY_PLAYERS", "HOME_STARTS", "AWAY_STARTS",
+    "HOME_SUBS", "AWAY_SUBS", "HOME_FORMATIONS", "AWAY_FORMATIONS", "RAW", "RUN_ID",
+)
+
+
+def upsert_many(rows: list[dict[str, Any]], conn=None) -> int:
+    """Upsert many matches' info with one staging load and one MERGE.
+
+    Equivalent to calling ``upsert`` per row, but a constant number of
+    statements regardless of how many matches are in ``rows``.
+    """
+    if not rows:
+        return 0
+    database, schema, table = TABLE.split(".")
+    stage = f"{database}.{schema}.{_STAGE_TABLE}"
+    df = pd.DataFrame([{key.upper(): value for key, value in row.items()} for row in rows])
+    df = df.reindex(columns=list(_STAGE_COLUMNS))
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                CREATE OR REPLACE TEMPORARY TABLE {stage} (
+                  MATCH_ID NUMBER, ITERATION_ID NUMBER, MATCH_DATETIME VARCHAR, LAST_CALCULATION VARCHAR,
+                  HOME_SQUAD_ID NUMBER, AWAY_SQUAD_ID NUMBER,
+                  HOME_PLAYERS VARCHAR, AWAY_PLAYERS VARCHAR, HOME_STARTS VARCHAR, AWAY_STARTS VARCHAR,
+                  HOME_SUBS VARCHAR, AWAY_SUBS VARCHAR, HOME_FORMATIONS VARCHAR, AWAY_FORMATIONS VARCHAR,
+                  RAW VARCHAR, RUN_ID NUMBER
+                )
+                """
+            )
+        success, _, count, _ = write_pandas(
+            conn=conn, df=df, table_name=_STAGE_TABLE, database=database, schema=schema,
+            overwrite=False, auto_create_table=False,
+        )
+        if not success:
+            raise RuntimeError(f"write_pandas reported failure staging {_STAGE_TABLE}")
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                MERGE INTO {TABLE} t
+                USING {stage} s ON t.MATCH_ID = s.MATCH_ID
+                WHEN MATCHED THEN UPDATE SET
+                  ITERATION_ID=s.ITERATION_ID,
+                  MATCH_DATETIME=TRY_TO_TIMESTAMP_NTZ(s.MATCH_DATETIME),
+                  SOURCE_LAST_CALCULATION_AT=TRY_TO_TIMESTAMP_NTZ(s.LAST_CALCULATION),
+                  HOME_SQUAD_ID=s.HOME_SQUAD_ID, AWAY_SQUAD_ID=s.AWAY_SQUAD_ID,
+                  HOME_PLAYERS=PARSE_JSON(s.HOME_PLAYERS), AWAY_PLAYERS=PARSE_JSON(s.AWAY_PLAYERS),
+                  HOME_STARTING_POSITIONS=PARSE_JSON(s.HOME_STARTS),
+                  AWAY_STARTING_POSITIONS=PARSE_JSON(s.AWAY_STARTS),
+                  HOME_SUBSTITUTIONS=PARSE_JSON(s.HOME_SUBS), AWAY_SUBSTITUTIONS=PARSE_JSON(s.AWAY_SUBS),
+                  HOME_FORMATIONS=PARSE_JSON(s.HOME_FORMATIONS), AWAY_FORMATIONS=PARSE_JSON(s.AWAY_FORMATIONS),
+                  RAW_MATCH_INFO=PARSE_JSON(s.RAW), SOURCE_FORMAT='MATCH_API',
+                  LOADED_AT=CURRENT_TIMESTAMP(), INGESTION_RUN_ID=s.RUN_ID
+                WHEN NOT MATCHED THEN INSERT (
+                  MATCH_ID, ITERATION_ID, MATCH_DATETIME, SOURCE_LAST_CALCULATION_AT,
+                  HOME_SQUAD_ID, AWAY_SQUAD_ID, HOME_PLAYERS, AWAY_PLAYERS,
+                  HOME_STARTING_POSITIONS, AWAY_STARTING_POSITIONS,
+                  HOME_SUBSTITUTIONS, AWAY_SUBSTITUTIONS, HOME_FORMATIONS, AWAY_FORMATIONS,
+                  RAW_MATCH_INFO, SOURCE_FORMAT, INGESTION_RUN_ID
+                ) VALUES (
+                  s.MATCH_ID, s.ITERATION_ID, TRY_TO_TIMESTAMP_NTZ(s.MATCH_DATETIME),
+                  TRY_TO_TIMESTAMP_NTZ(s.LAST_CALCULATION), s.HOME_SQUAD_ID, s.AWAY_SQUAD_ID,
+                  PARSE_JSON(s.HOME_PLAYERS), PARSE_JSON(s.AWAY_PLAYERS),
+                  PARSE_JSON(s.HOME_STARTS), PARSE_JSON(s.AWAY_STARTS),
+                  PARSE_JSON(s.HOME_SUBS), PARSE_JSON(s.AWAY_SUBS),
+                  PARSE_JSON(s.HOME_FORMATIONS), PARSE_JSON(s.AWAY_FORMATIONS),
+                  PARSE_JSON(s.RAW), 'MATCH_API', s.RUN_ID
+                )
+                """
+            )
+        conn.commit()
+        return int(count)
+    finally:
+        if owns_connection:
+            conn.close()
 
 
 def bootstrap_legacy(*, dry_run: bool = False) -> int:

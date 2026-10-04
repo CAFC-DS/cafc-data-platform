@@ -6,16 +6,29 @@ accessible non-women's V2+ iteration. Then run bounded processing batches
 until the queue is empty. Successes are never re-fetched; failures retry with
 backoff, and IMPECT's known permanent no-event response is terminal.
 
+Processing is built to be cheap on Snowflake: each claimed batch reuses one
+connection, fetches matches from IMPECT concurrently while the previous group
+loads, stages several matches per load and parses their VARIANT columns in one
+INSERT ... SELECT, and writes every match's queue state with one UPDATE.
+Unfinished claims are handed back (attempt not counted) if the process is
+stopped, and --max-matches / --stop-after-minutes bound a run.
+
 Examples:
     python backfill_historical_match_events.py --discover
     python backfill_historical_match_events.py --process --batch-size 25
+    python backfill_historical_match_events.py --process --max-matches 100 \
+        --query-tag "project=cafc-data-platform;job=impect-benchmark"
     python backfill_historical_match_events.py --status
 """
 from __future__ import annotations
 
 import argparse
+import os
+import signal
 import sys
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
@@ -34,6 +47,11 @@ QUEUE_TABLE = "CAFC_DB.CORE.IMPECT_EVENT_BACKFILL_QUEUE"
 DISCOVERY_TABLE = "CAFC_DB.CORE.IMPECT_EVENT_BACKFILL_DISCOVERY"
 QUEUE_SCHEMA = "CORE"
 TERMINAL_STATUSES = ("SUCCESS", "NO_EVENT_DATA")
+
+DEFAULT_LOAD_MATCHES = 10    # matches per staged load / INSERT ... SELECT
+DEFAULT_FETCH_WORKERS = 3    # concurrent IMPECT fetch threads per process
+MAX_ROWS_PER_LOAD = 80_000   # split a load group that would stage more event rows than this
+FAILED_RETRY_HOURS = 12      # cooldown before a FAILED match is claimable again
 
 
 def _records(response: Any) -> list[dict]:
@@ -259,9 +277,11 @@ def discover(iteration_batch_size: int, iteration_ids: set[int] | None = None, r
     return summary
 
 
-def _claim_batch(batch_size: int, max_attempts: int, iteration_ids: set[int] | None = None) -> tuple[str, list[dict]]:
+def _claim_batch(batch_size: int, max_attempts: int, iteration_ids: set[int] | None = None,
+                 conn=None) -> tuple[str, list[dict]]:
     claim_token = str(uuid.uuid4())
-    conn = get_connection()
+    owns_connection = conn is None
+    conn = conn or get_connection()
     try:
         with conn.cursor() as cur:
             # A failed or interrupted runner cannot leave work stuck forever.
@@ -310,71 +330,251 @@ def _claim_batch(batch_size: int, max_attempts: int, iteration_ids: set[int] | N
         conn.commit()
         return claim_token, claimed
     finally:
-        conn.close()
+        if owns_connection:
+            conn.close()
+
+
+def _finish_matches(conn, run_id: int, outcomes: dict[int, dict]) -> None:
+    """Write the final queue state of every match in a batch with ONE statement."""
+    if not outcomes:
+        return
+    params: dict[str, Any] = {"run_id": run_id}
+    values = []
+    for index, (match_id, outcome) in enumerate(sorted(outcomes.items())):
+        error = outcome.get("error")
+        params[f"m{index}"] = match_id
+        params[f"s{index}"] = outcome["status"]
+        params[f"c{index}"] = outcome.get("count")
+        params[f"e{index}"] = error[:4000] if error else None
+        values.append(f"(%(m{index})s, %(s{index})s, %(c{index})s, %(e{index})s)")
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            UPDATE {QUEUE_TABLE} t
+               SET STATUS=v.STATUS, EVENT_COUNT=v.EVENT_COUNT, LAST_ERROR=v.ERROR,
+                   INGESTION_RUN_ID=%(run_id)s, CLAIMED_BY=NULL, CLAIMED_AT=NULL,
+                   NEXT_ATTEMPT_AT=IFF(v.STATUS='FAILED', DATEADD(hour, {FAILED_RETRY_HOURS}, CURRENT_TIMESTAMP()), NULL),
+                   COMPLETED_AT=IFF(v.STATUS IN ('SUCCESS', 'NO_EVENT_DATA'), CURRENT_TIMESTAMP(), t.COMPLETED_AT),
+                   UPDATED_AT=CURRENT_TIMESTAMP()
+              FROM (
+                SELECT column1::NUMBER AS MATCH_ID, column2::VARCHAR AS STATUS,
+                       column3::NUMBER AS EVENT_COUNT, column4::VARCHAR AS ERROR
+                  FROM VALUES {', '.join(values)}
+              ) v
+             WHERE t.MATCH_ID = v.MATCH_ID
+            """,
+            params,
+        )
+    conn.commit()
 
 
 def _finish_match(match_id: int, status: str, run_id: int, event_count: int | None = None,
                   error: str | None = None) -> None:
+    """Single-match form of ``_finish_matches`` (kept for callers outside the batch path)."""
     conn = get_connection()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                UPDATE {QUEUE_TABLE}
-                   SET STATUS=%(status)s, EVENT_COUNT=%(event_count)s, LAST_ERROR=%(error)s,
-                       INGESTION_RUN_ID=%(run_id)s, CLAIMED_BY=NULL, CLAIMED_AT=NULL,
-                       NEXT_ATTEMPT_AT=IFF(%(status)s='FAILED', DATEADD(hour, 12, CURRENT_TIMESTAMP()), NULL),
-                       COMPLETED_AT=IFF(%(status)s IN ('SUCCESS', 'NO_EVENT_DATA'), CURRENT_TIMESTAMP(), COMPLETED_AT),
-                       UPDATED_AT=CURRENT_TIMESTAMP()
-                 WHERE MATCH_ID=%(match_id)s
-                """,
-                {"match_id": match_id, "status": status, "event_count": event_count,
-                 "error": error[:4000] if error else None, "run_id": run_id},
-            )
-        conn.commit()
+        _finish_matches(conn, run_id, {match_id: {"status": status, "count": event_count, "error": error}})
     finally:
         conn.close()
 
 
-def process(batch_size: int, max_attempts: int, iteration_ids: set[int] | None = None) -> dict[str, int]:
-    claim_token, claimed = _claim_batch(batch_size, max_attempts, iteration_ids)
-    if not claimed:
-        print("No eligible backfill work remains.")
-        return {"claimed": 0, "success": 0, "no_event_data": 0, "failed": 0}
-    conn = get_connection()
+def _release_claims(conn, claim_token: str) -> int:
+    """Hand a batch's unfinished claims back to the queue without counting the attempt."""
     with conn.cursor() as cur:
-        run_id = events._open_run(cur, "backfill_historical_match_events.py")
+        cur.execute(
+            f"""
+            UPDATE {QUEUE_TABLE}
+               SET STATUS='PENDING', CLAIMED_BY=NULL, CLAIMED_AT=NULL,
+                   ATTEMPT_COUNT=GREATEST(ATTEMPT_COUNT - 1, 0), UPDATED_AT=CURRENT_TIMESTAMP()
+             WHERE CLAIMED_BY=%(claim)s AND STATUS='RUNNING'
+            """,
+            {"claim": claim_token},
+        )
+        released = cur.rowcount or 0
     conn.commit()
-    success = no_event_data = failed = 0
+    return released
+
+
+class _Session:
+    """One reusable Snowflake connection that reconnects if it was closed."""
+
+    def __init__(self) -> None:
+        self._conn = None
+
+    def get(self):
+        if self._conn is None or self._conn.is_closed():
+            self._conn = get_connection()
+        return self._conn
+
+    def rollback(self) -> None:
+        try:
+            if self._conn is not None and not self._conn.is_closed():
+                self._conn.rollback()
+        except Exception:
+            self._conn = None
+
+    def close(self) -> None:
+        try:
+            if self._conn is not None and not self._conn.is_closed():
+                self._conn.close()
+        except Exception:
+            pass
+        self._conn = None
+
+
+def _fetch_one(item: dict, run_id: int) -> dict:
+    """Fetch everything IMPECT has for one match. No database access, safe to run in a thread."""
     try:
-        for item in claimed:
-            try:
-                rows = events.fetch_events_for_match(item["match_id"], item["iteration_id"], run_id)
-                if not rows:
-                    _finish_match(item["match_id"], "NO_EVENT_DATA", run_id, event_count=0)
-                    no_event_data += 1
-                    continue
-                count = events.load_events(rows, replace_existing_match=True)
-                match_info.fetch_and_load(item["match_id"], item["iteration_id"], run_id)
-                _finish_match(item["match_id"], "SUCCESS", run_id, event_count=count)
-                success += 1
-                print(f"match {item['match_id']}: loaded {count} events")
-            except Exception as exc:
-                _finish_match(item["match_id"], "FAILED", run_id, error=str(exc))
-                failed += 1
-                print(f"match {item['match_id']}: FAILED: {exc}", file=sys.stderr)
+        rows = events.fetch_events_for_match(item["match_id"], item["iteration_id"], run_id)
+        if not rows:
+            return {"item": item, "status": "NO_EVENT_DATA", "rows": [], "info": None, "error": None}
+        info = match_info.fetch_row(item["match_id"], item["iteration_id"], run_id)
+        return {"item": item, "status": "FETCHED", "rows": rows, "info": info, "error": None}
+    except Exception as exc:
+        return {"item": item, "status": "FAILED", "rows": [], "info": None, "error": str(exc)}
+
+
+def _split_by_rows(fetched: list[dict], max_rows: int) -> list[list[dict]]:
+    """Group fetched matches, in order, so no group stages more than ``max_rows`` event rows."""
+    groups: list[list[dict]] = []
+    current: list[dict] = []
+    current_rows = 0
+    for result in fetched:
+        size = len(result["rows"])
+        if current and current_rows + size > max_rows:
+            groups.append(current)
+            current, current_rows = [], 0
+        current.append(result)
+        current_rows += size
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _load_group(session: _Session, group: list[dict], run_id: int, outcomes: dict[int, dict]) -> None:
+    """Load a group of matches with one events load and one match-info MERGE.
+
+    If the combined load fails, retry the matches one by one so a single bad
+    match is marked FAILED instead of failing its neighbours.  Re-loading is
+    safe: ``replace_existing=True`` swaps out any rows a first attempt left.
+    """
+    rows = [row for result in group for row in result["rows"]]
+    infos = [result["info"] for result in group]
+    try:
+        conn = session.get()
+        events.load_events_batch(rows, replace_existing=True, conn=conn)
+        match_info.upsert_many(infos, conn=conn)
+    except Exception as exc:
+        session.rollback()
+        if len(group) == 1:
+            match_id = group[0]["item"]["match_id"]
+            outcomes[match_id] = {"status": "FAILED", "count": None, "error": str(exc)}
+            print(f"match {match_id}: FAILED: {exc}", file=sys.stderr)
+            return
+        print(f"  load of {len(group)} matches failed ({exc}); retrying one by one", file=sys.stderr)
+        for result in group:
+            _load_group(session, [result], run_id, outcomes)
+        return
+    for result in group:
+        match_id = result["item"]["match_id"]
+        count = len(result["rows"])
+        outcomes[match_id] = {"status": "SUCCESS", "count": count, "error": None}
+        print(f"match {match_id}: loaded {count} events")
+
+
+def _abandon(session: _Session, claim_token: str | None, run_id: int | None) -> None:
+    try:
+        conn = session.get()
+        released = _release_claims(conn, claim_token) if claim_token else 0
+        if run_id is not None:
+            with conn.cursor() as cur:
+                events._close_run(cur, run_id, "FAILED", "backfill batch interrupted")
+            conn.commit()
+        print(f"interrupted: released {released} unfinished claim(s)", file=sys.stderr)
+    except Exception as exc:
+        print(f"could not release claims after interruption: {exc}", file=sys.stderr)
+
+
+def process(batch_size: int, max_attempts: int, iteration_ids: set[int] | None = None, *,
+            load_matches: int = DEFAULT_LOAD_MATCHES,
+            fetch_workers: int = DEFAULT_FETCH_WORKERS) -> dict[str, int]:
+    session = _Session()
+    claim_token: str | None = None
+    run_id: int | None = None
+    pool: ThreadPoolExecutor | None = None
+    started = time.perf_counter()
+    try:
+        claim_token, claimed = _claim_batch(batch_size, max_attempts, iteration_ids, conn=session.get())
+        if not claimed:
+            print("No eligible backfill work remains.")
+            return {"claimed": 0, "success": 0, "no_event_data": 0, "failed": 0, "rows": 0}
+        conn = session.get()
+        with conn.cursor() as cur:
+            run_id = events._open_run(cur, "backfill_historical_match_events.py")
+        conn.commit()
+
+        outcomes: dict[int, dict] = {}
+        chunks = [claimed[i:i + max(1, load_matches)] for i in range(0, len(claimed), max(1, load_matches))]
+        fetch_wait = load_time = 0.0
+        loaded_rows = 0
+        pool = ThreadPoolExecutor(max_workers=max(1, fetch_workers))
+
+        def submit(chunk: list[dict]) -> list:
+            return [pool.submit(_fetch_one, item, run_id) for item in chunk]
+
+        # Fetch chunk N+1 from IMPECT while chunk N loads into Snowflake.
+        pending = submit(chunks[0])
+        for index in range(len(chunks)):
+            waited = time.perf_counter()
+            fetched = [future.result() for future in pending]
+            fetch_wait += time.perf_counter() - waited
+            pending = submit(chunks[index + 1]) if index + 1 < len(chunks) else []
+
+            loadable = []
+            for result in fetched:
+                match_id = result["item"]["match_id"]
+                if result["status"] == "FAILED":
+                    outcomes[match_id] = {"status": "FAILED", "count": None, "error": result["error"]}
+                    print(f"match {match_id}: FAILED: {result['error']}", file=sys.stderr)
+                elif result["status"] == "NO_EVENT_DATA":
+                    outcomes[match_id] = {"status": "NO_EVENT_DATA", "count": 0, "error": None}
+                else:
+                    loadable.append(result)
+            loading = time.perf_counter()
+            for group in _split_by_rows(loadable, MAX_ROWS_PER_LOAD):
+                _load_group(session, group, run_id, outcomes)
+                loaded_rows += sum(len(result["rows"]) for result in group)
+            load_time += time.perf_counter() - loading
+
+        for item in claimed:  # never leave a claimed match without a final state
+            outcomes.setdefault(item["match_id"], {"status": "FAILED", "count": None,
+                                                   "error": "internal: batch finished without an outcome"})
+        _finish_matches(session.get(), run_id, outcomes)
+
+        success = sum(1 for o in outcomes.values() if o["status"] == "SUCCESS")
+        no_event_data = sum(1 for o in outcomes.values() if o["status"] == "NO_EVENT_DATA")
+        failed = sum(1 for o in outcomes.values() if o["status"] == "FAILED")
+        conn = session.get()
         with conn.cursor() as cur:
             events._close_run(cur, run_id, "SUCCESS" if not failed else "PARTIAL_SUCCESS",
                               f"claimed={len(claimed)} success={success} no_event_data={no_event_data} failed={failed}")
         conn.commit()
-    except Exception:
-        with conn.cursor() as cur:
-            events._close_run(cur, run_id, "FAILED", "unexpected historical backfill failure")
-        conn.commit()
+        elapsed = time.perf_counter() - started
+        print(f"batch: claimed={len(claimed)} success={success} no_event_data={no_event_data} failed={failed} "
+              f"rows={loaded_rows} fetch_wait={fetch_wait:.1f}s load={load_time:.1f}s total={elapsed:.1f}s "
+              f"({len(claimed) / max(elapsed, 1e-9) * 3600:.0f} matches/hour)")
+        return {"claimed": len(claimed), "success": success, "no_event_data": no_event_data,
+                "failed": failed, "rows": loaded_rows}
+    except BaseException:
+        # Includes SystemExit from SIGTERM: stop fetching and hand unfinished claims back.
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
+        _abandon(session, claim_token, run_id)
         raise
     finally:
-        conn.close()
-    return {"claimed": len(claimed), "success": success, "no_event_data": no_event_data, "failed": failed}
+        if pool is not None:
+            pool.shutdown(wait=False)
+        session.close()
 
 
 def status() -> None:
@@ -409,18 +609,47 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--refresh", action="store_true",
                         help="With --discover, re-catalogue selected active iterations.")
     parser.add_argument("--max-attempts", type=int, default=5)
+    parser.add_argument("--load-matches", type=int, default=DEFAULT_LOAD_MATCHES,
+                        help="Matches staged and parsed per INSERT ... SELECT (default: %(default)s).")
+    parser.add_argument("--fetch-workers", type=int, default=DEFAULT_FETCH_WORKERS,
+                        help="Concurrent IMPECT fetch threads per process (default: %(default)s).")
+    parser.add_argument("--max-matches", type=int, default=None,
+                        help="With --process, stop after claiming this many matches in total.")
+    parser.add_argument("--stop-after-minutes", type=float, default=None,
+                        help="With --process, claim no new batch once this many minutes have elapsed.")
+    parser.add_argument("--query-tag", type=str, default=None,
+                        help="Snowflake QUERY_TAG for every session this process opens.")
     return parser.parse_args()
+
+
+def _terminate(signum: int, _frame: Any) -> None:
+    raise SystemExit(128 + signum)
 
 
 if __name__ == "__main__":
     args = parse_args()
+    if args.query_tag:
+        os.environ["SNOWFLAKE_QUERY_TAG"] = args.query_tag
+    ids = ({int(value) for value in args.iteration_ids.split(",")}
+           if args.iteration_ids and args.iteration_ids.strip() else None)
     if args.discover:
-        ids = {int(value) for value in args.iteration_ids.split(",")} if args.iteration_ids and args.iteration_ids.strip() else None
         discover(args.iteration_batch_size, ids, refresh=args.refresh)
     elif args.process:
-        ids = {int(value) for value in args.iteration_ids.split(",")} if args.iteration_ids and args.iteration_ids.strip() else None
+        signal.signal(signal.SIGTERM, _terminate)  # let a redeploy/stop release claims cleanly
+        budget = args.max_matches
+        deadline = time.monotonic() + args.stop_after_minutes * 60 if args.stop_after_minutes else None
         while True:
-            summary = process(args.batch_size, args.max_attempts, ids)
+            size = args.batch_size if budget is None else min(args.batch_size, budget)
+            if size <= 0:
+                print("Match budget reached.")
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                print("Time budget reached.")
+                break
+            summary = process(size, args.max_attempts, ids,
+                              load_matches=args.load_matches, fetch_workers=args.fetch_workers)
+            if budget is not None:
+                budget -= summary["claimed"]
             if not args.until_empty or summary["claimed"] == 0:
                 break
     else:

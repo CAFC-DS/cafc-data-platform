@@ -1,23 +1,42 @@
 """Container entrypoint for the queue-driven IMPECT event backfill (Railway).
 
-Runs N worker processes of backfill_historical_match_events.py scoped to
-BACKFILL_ITERATION_IDS and exits 0 once nothing in that scope can still be
-claimed, so a run-to-completion service stops billing when the work is done.
+Runs N worker processes of backfill_historical_match_events.py over a scope of
+iterations and exits when nothing in that scope can still be done, so a
+run-to-completion service stops billing when the work is finished.
+
+Scope (at least one is required, both may be given):
+  BACKFILL_ITERATION_IDS   comma-separated IMPECT iteration ids
+  BACKFILL_SEASONS         comma-separated queue SEASON labels, e.g. "25/26,2025"
+
+Exit codes: 0 when the scope is drained, or a match/time budget was reached;
+1 when it cannot progress (stalled) or the configuration is wrong.
+
+"Drained" means no row is left that a worker could still claim.  Matches in a
+FAILED cooldown, or whose attempts are used up, are reported but do not keep
+the service alive.
 
 Snowflake auth reads the PEM from SNOWFLAKE_PRIVATE_KEY (no key file on disk).
 
-Env:
-  BACKFILL_ITERATION_IDS   comma-separated IMPECT iteration ids (required)
-  BACKFILL_WORKERS         parallel workers (default 4)
-  BACKFILL_BATCH_SIZE      matches claimed per batch (default 25)
-  BACKFILL_MAX_ATTEMPTS    per-match attempt cap, as in the backfill script (default 5)
-  BACKFILL_MAX_STALLED     rounds with no progress before giving up (default 5)
+Env (defaults in brackets):
+  BACKFILL_WORKERS [2]               parallel worker processes
+  BACKFILL_BATCH_SIZE [25]           matches claimed per batch
+  BACKFILL_LOAD_MATCHES [10]         matches staged per INSERT ... SELECT
+  BACKFILL_FETCH_WORKERS [3]         concurrent IMPECT fetch threads per worker
+  BACKFILL_MAX_ATTEMPTS [5]          per-match attempt cap
+  BACKFILL_MAX_MATCHES               stop after about this many matches (budget)
+  BACKFILL_MAX_MINUTES               claim no new batch after this many minutes
+  BACKFILL_STALE_CLAIM_MINUTES [90]  claims older than this are handed back
+  BACKFILL_MAX_STALLED_MINUTES [120] give up after this long with no progress
+  BACKFILL_IDLE_POLL_SECONDS [300]   wait between checks while nothing is claimable
+  BACKFILL_QUERY_TAG                 QUERY_TAG for every Snowflake session
   SNOWFLAKE_*, IMPECT_USERNAME, IMPECT_PASSWORD
 """
 from __future__ import annotations
 
+import math
 import os
 import runpy
+import signal
 import subprocess
 import sys
 import time
@@ -31,9 +50,11 @@ import snowflake_loader
 
 QUEUE_TABLE = "CAFC_DB.CORE.IMPECT_EVENT_BACKFILL_QUEUE"
 REQUIRED_ENV = (
-    "BACKFILL_ITERATION_IDS", "SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER", "SNOWFLAKE_WAREHOUSE",
-    "SNOWFLAKE_ROLE", "SNOWFLAKE_PRIVATE_KEY", "IMPECT_USERNAME", "IMPECT_PASSWORD",
+    "SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER", "SNOWFLAKE_WAREHOUSE", "SNOWFLAKE_ROLE",
+    "SNOWFLAKE_PRIVATE_KEY", "IMPECT_USERNAME", "IMPECT_PASSWORD",
 )
+DEFAULT_QUERY_TAG = "project=cafc-data-platform;job=impect-backfill"
+COOLDOWN_GRACE_MINUTES = 5
 
 
 def get_connection():
@@ -48,36 +69,103 @@ def get_connection():
         schema=os.environ.get("SNOWFLAKE_SCHEMA", "IMPECT_RAW"),
         warehouse=os.environ["SNOWFLAKE_WAREHOUSE"],
         role=os.environ["SNOWFLAKE_ROLE"],
+        session_parameters={"QUERY_TAG": os.environ.get("SNOWFLAKE_QUERY_TAG") or DEFAULT_QUERY_TAG},
     )
 
 
-def _parse_ids(raw: str) -> list[int]:
-    return sorted({int(part) for part in raw.split(",") if part.strip()})
+def _env_int(name: str, default: int) -> int:
+    return int(os.environ.get(name) or default)
 
 
-def _scope_counts(iteration_ids: list[int], max_attempts: int) -> tuple[int, int]:
-    """Return (remaining, done) for the scoped iterations.
+def _env_optional_int(name: str) -> int | None:
+    value = os.environ.get(name)
+    return int(value) if value else None
 
-    remaining = rows a worker can still claim now or later: PENDING, RUNNING
-    (a sibling may hold it; stale claims are reclaimed after 12h), or FAILED
-    with attempts left.  done = SUCCESS + NO_EVENT_DATA.
+
+def _csv(raw: str | None) -> list[str]:
+    return [part.strip() for part in (raw or "").split(",") if part.strip()]
+
+
+def resolve_scope() -> list[int]:
+    """Iteration ids from BACKFILL_ITERATION_IDS plus those queued under BACKFILL_SEASONS."""
+    ids = {int(part) for part in _csv(os.environ.get("BACKFILL_ITERATION_IDS"))}
+    seasons = _csv(os.environ.get("BACKFILL_SEASONS"))
+    if seasons:
+        placeholders = ", ".join(f"%(s{index})s" for index in range(len(seasons)))
+        params = {f"s{index}": season for index, season in enumerate(seasons)}
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(f"SELECT DISTINCT ITERATION_ID FROM {QUEUE_TABLE} WHERE SEASON IN ({placeholders})", params)
+            ids.update(int(row[0]) for row in cur.fetchall())
+        finally:
+            conn.close()
+    return sorted(ids)
+
+
+def _scope_sql(iteration_ids: list[int]) -> str:
+    return ", ".join(str(value) for value in iteration_ids)
+
+
+def release_stale_claims(iteration_ids: list[int], stale_minutes: int) -> int:
+    """Hand back claims whose worker is gone (e.g. a redeploy killed it mid-batch).
+
+    Only called between rounds, when this supervisor has no live worker; the
+    threshold keeps other runners' recent claims untouched.
     """
-    scope = ", ".join(str(value) for value in iteration_ids)
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            UPDATE {QUEUE_TABLE}
+               SET STATUS='PENDING', CLAIMED_BY=NULL, CLAIMED_AT=NULL,
+                   ATTEMPT_COUNT=GREATEST(ATTEMPT_COUNT - 1, 0), UPDATED_AT=CURRENT_TIMESTAMP()
+             WHERE STATUS='RUNNING' AND ITERATION_ID IN ({_scope_sql(iteration_ids)})
+               AND CLAIMED_AT < DATEADD(minute, -{int(stale_minutes)}, CURRENT_TIMESTAMP())
+            """
+        )
+        conn.commit()
+        return cur.rowcount or 0
+    finally:
+        conn.close()
+
+
+def scope_counts(iteration_ids: list[int], max_attempts: int) -> dict[str, int]:
+    """Classify the scoped queue rows.
+
+    remaining  = work a worker can still do: PENDING with attempts left, RUNNING
+                 (another process holds it), or FAILED whose cooldown is over.
+    deferred   = FAILED rows still cooling down (not waited for).
+    exhausted  = PENDING/FAILED rows with no attempts left (not waited for).
+    done       = SUCCESS + NO_EVENT_DATA.
+    """
+    attempts = int(max_attempts)
+    soon = f"DATEADD(minute, {COOLDOWN_GRACE_MINUTES}, CURRENT_TIMESTAMP())"
     conn = get_connection()
     try:
         cur = conn.cursor()
         cur.execute(
             f"""
             SELECT
-              COUNT_IF(STATUS IN ('PENDING', 'RUNNING')
-                       OR (STATUS = 'FAILED' AND ATTEMPT_COUNT < {int(max_attempts)})),
-              COUNT_IF(STATUS IN ('SUCCESS', 'NO_EVENT_DATA'))
+              COUNT_IF(STATUS = 'PENDING' AND ATTEMPT_COUNT < {attempts}) AS pending,
+              COUNT_IF(STATUS = 'RUNNING') AS running,
+              COUNT_IF(STATUS = 'FAILED' AND ATTEMPT_COUNT < {attempts}
+                       AND (NEXT_ATTEMPT_AT IS NULL OR NEXT_ATTEMPT_AT <= {soon})) AS retryable,
+              COUNT_IF(STATUS = 'FAILED' AND ATTEMPT_COUNT < {attempts}
+                       AND NEXT_ATTEMPT_AT > {soon}) AS deferred,
+              COUNT_IF(STATUS IN ('PENDING', 'FAILED') AND ATTEMPT_COUNT >= {attempts}) AS exhausted,
+              COUNT_IF(STATUS IN ('SUCCESS', 'NO_EVENT_DATA')) AS done
             FROM {QUEUE_TABLE}
-            WHERE ITERATION_ID IN ({scope})
+            WHERE ITERATION_ID IN ({_scope_sql(iteration_ids)})
             """
         )
-        remaining, done = cur.fetchone()
-        return int(remaining), int(done)
+        pending, running, retryable, deferred, exhausted, done = (int(value or 0) for value in cur.fetchone())
+        return {
+            "remaining": pending + running + retryable,
+            "pending": pending, "running": running, "retryable": retryable,
+            "deferred": deferred, "exhausted": exhausted, "done": done,
+        }
     finally:
         conn.close()
 
@@ -89,52 +177,109 @@ def run_worker() -> None:
     runpy.run_path("backfill_historical_match_events.py", run_name="__main__")
 
 
+def _stop_workers(procs: list[subprocess.Popen], grace_seconds: int = 20) -> None:
+    for proc in procs:
+        if proc.poll() is None:
+            proc.terminate()  # workers hand their unfinished claims back on SIGTERM
+    deadline = time.monotonic() + grace_seconds
+    for proc in procs:
+        try:
+            proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def supervise() -> int:
     missing = [name for name in REQUIRED_ENV if not os.environ.get(name)]
+    if not (os.environ.get("BACKFILL_ITERATION_IDS") or os.environ.get("BACKFILL_SEASONS")):
+        missing.append("BACKFILL_ITERATION_IDS or BACKFILL_SEASONS")
     if missing:
         print(f"missing required env vars: {', '.join(missing)}", flush=True)
         return 1
 
-    iteration_ids = _parse_ids(os.environ["BACKFILL_ITERATION_IDS"])
-    workers = int(os.environ.get("BACKFILL_WORKERS", "4"))
-    batch_size = os.environ.get("BACKFILL_BATCH_SIZE", "25")
-    max_attempts = int(os.environ.get("BACKFILL_MAX_ATTEMPTS", "5"))
-    max_stalled = int(os.environ.get("BACKFILL_MAX_STALLED", "5"))
+    os.environ.setdefault("SNOWFLAKE_QUERY_TAG", os.environ.get("BACKFILL_QUERY_TAG") or DEFAULT_QUERY_TAG)
+    workers = _env_int("BACKFILL_WORKERS", 2)
+    batch_size = _env_int("BACKFILL_BATCH_SIZE", 25)
+    load_matches = _env_int("BACKFILL_LOAD_MATCHES", 10)
+    fetch_workers = _env_int("BACKFILL_FETCH_WORKERS", 3)
+    max_attempts = _env_int("BACKFILL_MAX_ATTEMPTS", 5)
+    stale_minutes = _env_int("BACKFILL_STALE_CLAIM_MINUTES", 90)
+    max_stalled_minutes = _env_int("BACKFILL_MAX_STALLED_MINUTES", 120)
+    idle_poll_seconds = _env_int("BACKFILL_IDLE_POLL_SECONDS", 300)
+    max_matches = _env_optional_int("BACKFILL_MAX_MATCHES")
+    max_minutes = _env_optional_int("BACKFILL_MAX_MINUTES")
+
+    iteration_ids = resolve_scope()
+    if not iteration_ids:
+        print("scope resolved to no iterations; nothing to do", flush=True)
+        return 1
     ids_arg = ",".join(str(value) for value in iteration_ids)
 
-    stalled = 0
-    round_no = 0
-    remaining, done = _scope_counts(iteration_ids, max_attempts)
-    print(f"start: {len(iteration_ids)} iterations, remaining={remaining} done={done}", flush=True)
+    started = time.monotonic()
+    deadline = started + max_minutes * 60 if max_minutes else None
+    procs: list[subprocess.Popen] = []
 
-    while remaining > 0:
+    def _on_sigterm(signum, _frame):
+        _stop_workers(procs)
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
+    counts = scope_counts(iteration_ids, max_attempts)
+    done_at_start = counts["done"]
+    last_progress = time.monotonic()
+    print(f"start: {len(iteration_ids)} iterations, {counts}", flush=True)
+
+    round_no = 0
+    while True:
+        released = release_stale_claims(iteration_ids, stale_minutes)
+        if released:
+            print(f"released {released} stale claim(s)", flush=True)
+            counts = scope_counts(iteration_ids, max_attempts)
+
+        if counts["remaining"] == 0:
+            print(f"backfill complete: {counts}", flush=True)
+            return 0
+        done_this_run = counts["done"] - done_at_start
+        if max_matches is not None and done_this_run >= max_matches:
+            print(f"match budget reached ({done_this_run} >= {max_matches}): {counts}", flush=True)
+            return 0
+        if deadline is not None and time.monotonic() >= deadline:
+            print(f"time budget reached: {counts}", flush=True)
+            return 0
+
         round_no += 1
-        procs = [
-            subprocess.Popen([
-                sys.executable, "-u", os.path.abspath(__file__), "--worker",
-                "--process", "--until-empty", "--batch-size", batch_size,
-                "--max-attempts", str(max_attempts), "--iteration-ids", ids_arg,
-            ])
-            for _ in range(workers)
+        command = [
+            sys.executable, "-u", os.path.abspath(__file__), "--worker",
+            "--process", "--until-empty", "--batch-size", str(batch_size),
+            "--max-attempts", str(max_attempts), "--iteration-ids", ids_arg,
+            "--load-matches", str(load_matches), "--fetch-workers", str(fetch_workers),
         ]
+        if max_matches is not None:
+            command += ["--max-matches", str(math.ceil((max_matches - done_this_run) / workers))]
+        if deadline is not None:
+            command += ["--stop-after-minutes", f"{max(0.1, (deadline - time.monotonic()) / 60):.2f}"]
+        procs = [subprocess.Popen(command) for _ in range(workers)]
         for proc in procs:
             proc.wait()
 
-        remaining, new_done = _scope_counts(iteration_ids, max_attempts)
-        print(f"round {round_no}: remaining={remaining} done={new_done} (+{new_done - done})", flush=True)
-        stalled = 0 if new_done > done else stalled + 1
-        done = new_done
-        if remaining == 0:
-            break
-        if stalled >= max_stalled:
-            print(f"no progress for {stalled} rounds with {remaining} remaining; giving up", flush=True)
+        previous_done = counts["done"]
+        counts = scope_counts(iteration_ids, max_attempts)
+        progressed = counts["done"] > previous_done
+        if progressed:
+            last_progress = time.monotonic()
+        print(f"round {round_no}: {counts} (+{counts['done'] - previous_done})", flush=True)
+        if counts["remaining"] == 0:
+            continue  # re-checked (and reported) at the top of the loop
+        stalled_minutes = (time.monotonic() - last_progress) / 60
+        if stalled_minutes >= max_stalled_minutes:
+            print(f"no progress for {stalled_minutes:.0f} minutes with {counts['remaining']} remaining; giving up",
+                  flush=True)
             return 1
-        # Workers also exit while rows sit in FAILED cooldown or a sibling holds
-        # the last claims; wait before checking the queue again.
-        time.sleep(60)
-
-    print(f"backfill complete: done={done}", flush=True)
-    return 0
+        if not progressed:
+            # Nothing claimable right now (rows held by another runner or cooling down):
+            # wait with the warehouse suspended rather than polling every minute.
+            time.sleep(idle_poll_seconds)
 
 
 if __name__ == "__main__":

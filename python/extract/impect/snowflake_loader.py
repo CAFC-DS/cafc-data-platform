@@ -1,12 +1,16 @@
 """
 Simple procedural functions to load data into Snowflake
 """
+import os
 import snowflake.connector
 import pandas as pd
 from pathlib import Path
 from snowflake.connector.pandas_tools import write_pandas
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 import config
+
+
+DEFAULT_QUERY_TAG = "project=cafc-data-platform;component=impect-extract"
 
 
 def get_connection():
@@ -34,6 +38,9 @@ def get_connection():
         schema=config.SNOWFLAKE_SCHEMA,
         warehouse=config.SNOWFLAKE_WAREHOUSE,
         role=config.SNOWFLAKE_ROLE,
+        # Tag every session so credits can be reported per job (read at connect
+        # time so a CLI flag such as --query-tag can set it).
+        session_parameters={"QUERY_TAG": os.getenv("SNOWFLAKE_QUERY_TAG") or DEFAULT_QUERY_TAG},
         ocsp_fail_open=True,
         insecure_mode=True
     )

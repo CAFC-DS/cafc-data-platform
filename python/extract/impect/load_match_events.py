@@ -227,63 +227,108 @@ def fetch_events_for_match(match_id: int, iteration_id, run_id: int, include_kpi
 _VARIANT_COLUMNS = list(_VARIANT_FIELDS.values()) + ["RAW_EVENT", "EVENT_KPIS"]
 
 
-def load_events(rows: list[dict], *, replace_existing_match: bool = False) -> int:
-    """Load one match's events.
+_STAGE_TABLE = "EVENTS_LOAD_STAGE"
 
-    ``replace_existing_match`` makes a re-pull safe when Impect recalculates a
-    match and changes its event ids.  New rows are written first; only after
-    the write and VARIANT conversion succeed are older rows for that match
-    removed.  A failed re-pull therefore leaves the previous usable copy in
-    place rather than creating a gap in the raw landing table.
+
+def _qualified(name: str) -> str:
+    return f"{config.SNOWFLAKE_DATABASE}.{config.SNOWFLAKE_SCHEMA}.{name}"
+
+
+def load_events_batch(rows: list[dict], *, replace_existing: bool = False, conn=None) -> int:
+    """Load the events of one or more matches with a constant number of statements.
+
+    The previous loader wrote each match with ``write_pandas`` straight into
+    EVENTS and then ran one ``UPDATE ... SET col = PARSE_JSON(col)`` per
+    VARIANT column (12 of them) to turn the landed JSON text into real VARIANT
+    values.  Every one of those updates rewrote the freshly loaded
+    micro-partitions and took the table lock, so cost and run time grew with
+    ``matches * 12`` and parallel workers queued behind each other.
+
+    Here the rows land in a session-scoped staging table whose VARIANT columns
+    are plain VARCHAR, and a single ``INSERT ... SELECT`` parses all of them in
+    one pass, so new data is written exactly once.  Many matches can share one
+    call, and a caller-owned connection can be reused across calls.
+
+    ``replace_existing`` keeps re-pulls safe (Impect recalculates a match and
+    may change its event ids): the matches that already have rows are looked up
+    first (a pruned read), and only for those are the older rows deleted --
+    inside the same transaction as the insert, so a failure leaves the previous
+    copy untouched.  Matches with no existing rows cost no DELETE at all.
+
+    Returns the number of event rows inserted.
     """
     if not rows:
         return 0
     df = pd.DataFrame(rows)
-    conn = get_connection()
+    variant_cols = [col for col in _VARIANT_COLUMNS if col in df.columns]
+    scalar_cols = [col for col in df.columns if col not in variant_cols]
+    run_id = int(df["INGESTION_RUN_ID"].iloc[0])
+    match_ids = sorted({int(m) for m in df["MATCH_ID"].unique()})
+    stage = _qualified(_STAGE_TABLE)
+    target = _qualified(TABLE_NAME)
+
+    owns_connection = conn is None
+    conn = conn or get_connection()
     try:
-        # write_pandas lands a Python JSON string into a VARIANT column as a
-        # literal quoted string scalar, not a parsed object (confirmed live:
-        # PXT_DETAIL:team returned NULL until re-parsed). Bulk-fix with one
-        # UPDATE per VARIANT column scoped to this run rather than looping
-        # PARSE_JSON per row on insert -- keeps the fast bulk write_pandas
-        # path while still landing real parsed VARIANT data.
+        with conn.cursor() as cur:
+            # Typed like the target for scalar columns; VARIANT columns are
+            # VARCHAR here because write_pandas can only land JSON as text.
+            stage_select = ", ".join(
+                [*scalar_cols, *[f"NULL::VARCHAR AS {col}" for col in variant_cols]]
+            )
+            cur.execute(
+                f"CREATE OR REPLACE TEMPORARY TABLE {stage} AS "
+                f"SELECT {stage_select} FROM {target} WHERE 1 = 0"
+            )
+
         success, _, num_rows, _ = write_pandas(
             conn=conn,
             df=df,
-            table_name=TABLE_NAME,
+            table_name=_STAGE_TABLE,
             database=config.SNOWFLAKE_DATABASE,
             schema=config.SNOWFLAKE_SCHEMA,
             overwrite=False,
             auto_create_table=False,
         )
         if not success:
-            raise RuntimeError(f"write_pandas reported failure loading {TABLE_NAME}")
+            raise RuntimeError(f"write_pandas reported failure staging {_STAGE_TABLE}")
 
-        run_id = int(df["INGESTION_RUN_ID"].iloc[0])
+        insert_cols = ", ".join([*scalar_cols, *variant_cols])
+        select_cols = ", ".join([*scalar_cols, *[f"PARSE_JSON({col})" for col in variant_cols]])
+        id_list = ", ".join(str(match_id) for match_id in match_ids)
+
         with conn.cursor() as cur:
-            for col in _VARIANT_COLUMNS:
+            existing: list[int] = []
+            if replace_existing:
+                cur.execute(f"SELECT DISTINCT MATCH_ID FROM {target} WHERE MATCH_ID IN ({id_list})")
+                existing = [int(row[0]) for row in cur.fetchall()]
+
+            cur.execute("BEGIN")
+            try:
                 cur.execute(
-                    f"""
-                    UPDATE {config.SNOWFLAKE_DATABASE}.{config.SNOWFLAKE_SCHEMA}.{TABLE_NAME}
-                       SET {col} = PARSE_JSON({col}::STRING)
-                     WHERE INGESTION_RUN_ID = %(run_id)s AND {col} IS NOT NULL
-                    """,
-                    {"run_id": run_id},
+                    f"INSERT INTO {target} ({insert_cols}) "
+                    f"SELECT {select_cols} FROM {stage} ORDER BY MATCH_ID, EVENT_INDEX"
                 )
-            if replace_existing_match:
-                match_id = int(df["MATCH_ID"].iloc[0])
-                cur.execute(
-                    f"""
-                    DELETE FROM {config.SNOWFLAKE_DATABASE}.{config.SNOWFLAKE_SCHEMA}.{TABLE_NAME}
-                     WHERE MATCH_ID = %(match_id)s
-                       AND COALESCE(INGESTION_RUN_ID, -1) != %(run_id)s
-                    """,
-                    {"match_id": match_id, "run_id": run_id},
-                )
-        conn.commit()
-        return num_rows
+                if existing:
+                    cur.execute(
+                        f"DELETE FROM {target} "
+                        f"WHERE MATCH_ID IN ({', '.join(str(m) for m in existing)}) "
+                        f"AND COALESCE(INGESTION_RUN_ID, -1) != %(run_id)s",
+                        {"run_id": run_id},
+                    )
+                cur.execute("COMMIT")
+            except BaseException:
+                cur.execute("ROLLBACK")
+                raise
+        return int(num_rows)
     finally:
-        conn.close()
+        if owns_connection:
+            conn.close()
+
+
+def load_events(rows: list[dict], *, replace_existing_match: bool = False) -> int:
+    """Load one match's events (compatibility wrapper around ``load_events_batch``)."""
+    return load_events_batch(rows, replace_existing=replace_existing_match)
 
 
 def backfill_kpis(match_ids: list[int]) -> dict:
