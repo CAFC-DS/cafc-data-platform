@@ -307,3 +307,49 @@ def test_missing_countries_are_filled_from_the_api_iteration_list():
     filled = plan_mod.fill_missing_countries(rows, api_iterations)
 
     assert [r["country_id"] for r in filled] == [462, 393, None]   # known ids untouched, unknown stay unmapped
+
+
+# ------------------------------------------------------------- stage status tool
+
+sys.path.insert(0, str(IMPECT_DIR.parents[1] / "tools"))
+import backfill_stage_status as sst  # noqa: E402
+
+
+def _it(iteration_id, loaded=0, no_data=0, pending=0, running=0, retryable=0, deferred=0, exhausted=0, last=None):
+    return {"iteration_id": iteration_id, "competition": f"Comp {iteration_id}", "season": "26/27", "pending": pending,
+            "running": running, "retryable": retryable, "deferred": deferred, "exhausted": exhausted,
+            "loaded": loaded, "no_data": no_data, "last_completed": last}
+
+
+def test_stage_is_complete_only_when_nothing_is_claimable_and_data_loaded():
+    done = sst.classify_stage([_it(1, loaded=10, last=datetime(2026, 10, 4, 18, 0)),
+                               _it(2, loaded=5, no_data=2, deferred=1, exhausted=1, last=datetime(2026, 10, 4, 19, 30))])
+    assert done["status"] == "complete" and done["completed_at"] == "2026-10-04T19:30:00"
+    assert (done["loaded"], done["no_event_data"], done["deferred_failures"], done["exhausted"]) == (15, 2, 1, 1)
+
+    assert sst.classify_stage([_it(1, loaded=10, pending=3)])["status"] == "in_progress"
+    assert sst.classify_stage([_it(1, loaded=10, running=1)])["status"] == "in_progress"
+    assert sst.classify_stage([_it(1, pending=9)])["status"] == "pending"
+    assert sst.classify_stage([_it(1, loaded=0, no_data=0)])["status"] == "pending"   # nothing loaded yet is not "complete"
+
+
+def test_stage_report_follows_plan_order_and_lists_only_loaded_iterations():
+    plan = plan_mod.build_plan([_row(1, "26/27", 393), _row(2, "26/27", 393), _row(3, "26/27", 549)], "t")
+    per = {1: _it(1, loaded=4, last=datetime(2026, 10, 4, 17, 0)), 2: _it(2, no_data=3, last=datetime(2026, 10, 4, 17, 5)),
+           3: _it(3, pending=5)}
+
+    report = sst.stage_report(plan, per)
+
+    assert [(s["group"], s["status"]) for s in report] == [("Nordics & Baltics", "complete"), ("British Isles", "pending")]
+    assert [i["iteration_id"] for i in report[0]["iterations"]] == [1]       # iteration 2 loaded nothing
+    assert report[0]["completed_at"] == "2026-10-04T17:05:00"
+
+
+def test_since_filter_keeps_only_stages_completed_after_the_watermark():
+    report = [{"status": "complete", "completed_at": "2026-10-04T17:00:00"},
+              {"status": "complete", "completed_at": "2026-10-04T19:00:00"},
+              {"status": "in_progress", "completed_at": None}]
+
+    kept = sst.only_completed_since(report, datetime(2026, 10, 4, 18, 0))
+
+    assert [s["completed_at"] for s in kept] == ["2026-10-04T19:00:00"]
