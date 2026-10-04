@@ -25,7 +25,7 @@ No table DDL changed. `EVENTS_LOAD_STAGE` and `MATCH_INFO_LOAD_STAGE` are sessio
 Run as a role that can create warehouses and monitors. Names and the quota are placeholders.
 
 ```sql
-CREATE WAREHOUSE IF NOT EXISTS INGEST_WH
+CREATE WAREHOUSE IF NOT EXISTS BACKFILL_WH
   WAREHOUSE_SIZE = 'XSMALL' AUTO_SUSPEND = 60 AUTO_RESUME = TRUE INITIALLY_SUSPENDED = TRUE
   STATEMENT_TIMEOUT_IN_SECONDS = 1800
   COMMENT = 'IMPECT historical backfill only. Nothing else runs here.';
@@ -36,12 +36,53 @@ CREATE RESOURCE MONITOR IMPECT_INGEST_MONITOR WITH CREDIT_QUOTA = <approved cred
            ON 75 PERCENT DO NOTIFY
            ON 90 PERCENT DO SUSPEND
            ON 100 PERCENT DO SUSPEND_IMMEDIATE;
-ALTER WAREHOUSE INGEST_WH SET RESOURCE_MONITOR = IMPECT_INGEST_MONITOR;
-GRANT USAGE ON WAREHOUSE INGEST_WH TO ROLE <role the backfill connects as>;
+ALTER WAREHOUSE BACKFILL_WH SET RESOURCE_MONITOR = IMPECT_INGEST_MONITOR;
 ```
 
-Point the backfill at it with `SNOWFLAKE_WAREHOUSE=INGEST_WH` (and make sure
-`SNOWFLAKE_ROLE` is a role with usage on it). Run nothing else on it.
+### Role and service user (admin, once)
+
+The connector logs in as a **user** (with an RSA key) and uses a **role** for its permissions, so
+create both: a least-privilege role, and a service user that only ever holds that role. Use a
+new key pair for it rather than a person's key.
+
+```sql
+-- as SECURITYADMIN (or a role that can create roles/users)
+CREATE ROLE IF NOT EXISTS BACKFILL_ROLE COMMENT = 'IMPECT historical backfill, least privilege';
+CREATE USER IF NOT EXISTS BACKFILL_USER TYPE = SERVICE  -- drop TYPE if your account lacks it
+  DEFAULT_ROLE = BACKFILL_ROLE DEFAULT_WAREHOUSE = BACKFILL_WH
+  COMMENT = 'Service user for the IMPECT backfill (key-pair auth only)';
+GRANT ROLE BACKFILL_ROLE TO USER BACKFILL_USER;
+ALTER USER BACKFILL_USER SET RSA_PUBLIC_KEY = '<public key, without the BEGIN/END lines>';
+
+-- as ACCOUNTADMIN (or the owner of these objects)
+GRANT USAGE ON WAREHOUSE BACKFILL_WH TO ROLE BACKFILL_ROLE;
+GRANT USAGE ON DATABASE CAFC_DB TO ROLE BACKFILL_ROLE;
+GRANT USAGE ON SCHEMA CAFC_DB.IMPECT_RAW TO ROLE BACKFILL_ROLE;
+GRANT USAGE ON SCHEMA CAFC_DB.CORE TO ROLE BACKFILL_ROLE;
+-- write_pandas and the staging step create TEMPORARY objects in IMPECT_RAW
+GRANT CREATE TABLE, CREATE STAGE, CREATE FILE FORMAT ON SCHEMA CAFC_DB.IMPECT_RAW TO ROLE BACKFILL_ROLE;
+GRANT SELECT, INSERT, DELETE ON TABLE CAFC_DB.IMPECT_RAW.EVENTS TO ROLE BACKFILL_ROLE;      -- DELETE only for re-pulls
+GRANT SELECT, INSERT, UPDATE ON TABLE CAFC_DB.IMPECT_RAW.MATCH_INFO TO ROLE BACKFILL_ROLE;  -- MERGE
+GRANT SELECT, UPDATE ON TABLE CAFC_DB.CORE.IMPECT_EVENT_BACKFILL_QUEUE TO ROLE BACKFILL_ROLE;
+GRANT SELECT, INSERT, UPDATE ON TABLE CAFC_DB.CORE.INGESTION_RUNS TO ROLE BACKFILL_ROLE;
+```
+
+Those grants cover **processing** (`--process` and the Railway supervisor). Discovery
+(`--discover`) also writes the discovery table and iteration metadata and creates temp objects in
+`CORE`, so run it as a person's role, not as `BACKFILL_ROLE`.
+
+Create the key pair locally, keep the private key out of the repo, and put its PEM text in
+`SNOWFLAKE_PRIVATE_KEY`:
+
+```bash
+openssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -nocrypt -out backfill_rsa_key.p8
+openssl rsa -in backfill_rsa_key.p8 -pubout -out backfill_rsa_key.pub
+```
+
+Backfill variables: `SNOWFLAKE_USER=BACKFILL_USER`, `SNOWFLAKE_ROLE=BACKFILL_ROLE`,
+`SNOWFLAKE_WAREHOUSE=BACKFILL_WH`, `SNOWFLAKE_PRIVATE_KEY=<new key>`. Once the service runs
+on these, remove any broader key or role (for example an ACCOUNTADMIN login) from the Railway
+service. Run nothing else on `BACKFILL_WH`.
 
 ## 2. Benchmark 100 matches before any bulk run
 
@@ -69,7 +110,7 @@ WHERE START_TIME >= DATEADD(day, -1, CURRENT_TIMESTAMP())
 -- What the warehouse actually billed over the run window (includes idle/resume time)
 SELECT SUM(CREDITS_USED) AS credits
 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
-WHERE WAREHOUSE_NAME = 'INGEST_WH' AND START_TIME >= '<run start>' AND END_TIME <= '<run end>';
+WHERE WAREHOUSE_NAME = 'BACKFILL_WH' AND START_TIME >= '<run start>' AND END_TIME <= '<run end>';
 ```
 
 Record **credits per match = billed credits / 100** and **matches per hour**, then forecast:
