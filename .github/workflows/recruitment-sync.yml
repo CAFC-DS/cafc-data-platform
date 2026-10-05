@@ -1,0 +1,166 @@
+name: All-competitions recruitment sync (IMPECT)
+
+# Keeps recruitment-facing data current across EVERY IMPECT competition, not
+# just the EFL Championship (championship-sync.yml stays scoped to
+# Championship for the deep events/set-piece analysis pipeline — this
+# workflow is the separate, breadth-first counterpart).
+#
+# Root cause this exists for (2026-09-22): championship-sync.yml replaced the
+# old all-competition daily sync and nothing else picked up the slack, so
+# MLS/Premier League 2/etc. fixtures went 5+ weeks stale, and match identity
+# linking (fixture_matcher) hadn't run outside Championship in a long time —
+# 4,731 IMPECT fixtures were sitting unlinked in CORE.FIXTURE_IDENTITIES,
+# invisible to the recruitment app's fixture search/manual-add (see
+# dbt/models/app_compat/matches.sql, which reads off CORE.FIXTURES).
+#
+# Two jobs:
+#   reference-refresh - daily. Full-replace loaders across ALL competitions
+#                        (iterations/matches/squads/players/coaches/stadiums/
+#                        countries) -- these proved cheap in practice (~1,500
+#                        iterations of match data in under 2 minutes, IMPECT's
+#                        API has effectively no floor pace here). Then mints
+#                        any newly-visible IMPECT fixtures into CORE.FIXTURES
+#                        via fixture_matcher.py --apply -- THIS is the step
+#                        that actually makes new fixtures show up in the app;
+#                        without it, raw data can be fresh while the app
+#                        still can't see it. Idempotent/safe to re-run. Ends
+#                        with verify_fixture_sync.py, which is the ongoing
+#                        answer to "how do we regularly check this stays
+#                        fixed": re-checks the backlog is still 0 and fails
+#                        the job (Actions tab + failure email) if not, plus a
+#                        non-failing warning for any current-season
+#                        competition with a suspiciously thin fixture count
+#                        (the PL2-style near-total-absence failure mode).
+#   player-data-refresh - weekly (Monday). The per-iteration-per-squad loaders
+#                        (player/squad KPIs and scores, squad ratings) --
+#                        cost scales with squads x iterations, not just
+#                        iteration count, so these stay off the daily path.
+#                        Runs a full sweep across all iterations (each script's
+#                        own default, no CLI scoping); weekly is the tradeoff
+#                        between cost and freshness. If a full sweep proves
+#                        too slow/expensive in practice, several of these
+#                        loaders accept --iteration-id/--limit-iterations to
+#                        scope to recently-active iterations instead (derived
+#                        from MATCHES, now kept fresh daily by the other job).
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Reference refresh: daily at 06:00 UTC, ahead of DVMS/Championship's
+    # 08:00-09:00 window.
+    - cron: "0 6 * * *"
+    # Player-data refresh: Monday 07:00 UTC only (gated below).
+    - cron: "0 7 * * 1"
+
+concurrency:
+  group: recruitment-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  reference-refresh:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 6 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Write Snowflake private key
+        env:
+          SNOWFLAKE_PRIVATE_KEY_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$SNOWFLAKE_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/snowflake_key.pem"
+          chmod 600 "$RUNNER_TEMP/snowflake_key.pem"
+
+      - name: Refresh IMPECT reference data (all competitions)
+        working-directory: python/extract/impect
+        env:
+          IMPECT_USERNAME: ${{ secrets.IMPECT_USERNAME }}
+          IMPECT_PASSWORD: ${{ secrets.IMPECT_PASSWORD }}
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_DATABASE: CAFC_DB
+        run: |
+          export SNOWFLAKE_PRIVATE_KEY_PATH="$RUNNER_TEMP/snowflake_key.pem"
+          python load_iterations.py
+          python load_matches.py
+          python load_squads.py
+          python load_players.py
+          python load_coaches.py
+          python load_stadiums.py
+          python load_countries.py
+
+      - name: Mint newly-visible fixtures into CORE.FIXTURES
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_DATABASE: CAFC_DB
+        run: |
+          export SNOWFLAKE_PRIVATE_KEY_PATH="$RUNNER_TEMP/snowflake_key.pem"
+          python -m python.identity.fixture_matcher --apply
+
+      - name: Verify sync health (backlog + thin current-season competitions)
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_DATABASE: CAFC_DB
+        run: |
+          export SNOWFLAKE_PRIVATE_KEY_PATH="$RUNNER_TEMP/snowflake_key.pem"
+          python -m python.identity.verify_fixture_sync
+
+  player-data-refresh:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 7 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: python/extract/impect
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        working-directory: .
+        run: pip install -e .
+
+      - name: Write Snowflake private key
+        env:
+          SNOWFLAKE_PRIVATE_KEY_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$SNOWFLAKE_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/snowflake_key.pem"
+          chmod 600 "$RUNNER_TEMP/snowflake_key.pem"
+
+      - name: Refresh player/squad KPIs, scores, ratings (all competitions)
+        env:
+          IMPECT_USERNAME: ${{ secrets.IMPECT_USERNAME }}
+          IMPECT_PASSWORD: ${{ secrets.IMPECT_PASSWORD }}
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_DATABASE: CAFC_DB
+        run: |
+          export SNOWFLAKE_PRIVATE_KEY_PATH="$RUNNER_TEMP/snowflake_key.pem"
+          python load_iteration_squad_kpis.py
+          python load_iteration_squad_scores.py
+          python load_iteration_player_kpis.py
+          python load_iteration_player_scores.py
+          python load_squad_ratings.py
