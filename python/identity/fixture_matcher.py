@@ -24,8 +24,15 @@ is fixed upstream.
 Already-linked fixtures get one correction: IMPECT sometimes flips a match's
 home/away after it was minted, so any IMPECT-created fixture whose two squads
 are the reverse of IMPECT_RAW.MATCHES is swapped back in place (see
-fetch_reversed / update_reversed). Squad re-IDs and rescheduled dates are
-deliberately NOT synced. MANUAL and merged fixtures are never touched.
+fetch_reversed / update_squads).
+
+A second, guarded pass handles squad re-IDs: when IMPECT now carries a
+different squad id on a linked fixture (merged duplicate clubs, a corrected
+opponent), CORE.FIXTURES is pointed at the new id -- but only if BOTH current
+IMPECT squad ids resolve in CORE_SQUADS (and are MALE unless --include-womens).
+Anything that doesn't resolve is left alone and counted (fetch_reid /
+count_reid_blocked) so it can be reviewed. Rescheduled dates are deliberately
+NOT synced. MANUAL and merged fixtures are never touched.
 
 Run with the default (no --apply) for a read-only count; --apply to write.
 """
@@ -42,6 +49,10 @@ log = logging.getLogger("cafc.identity.fixture_matcher")
 
 def _gender_clause(include_womens: bool) -> str:
     return "" if include_womens else "AND hs.GENDER = 'MALE' AND aws.GENDER = 'MALE'"
+
+
+def _squad_gender(alias: str, include_womens: bool) -> str:
+    return "" if include_womens else f"AND {alias}.GENDER = 'MALE'"
 
 
 def fetch_unlinked(cur, include_womens: bool) -> list[tuple]:
@@ -104,10 +115,65 @@ def fetch_reversed(cur) -> list[tuple]:
     return cur.fetchall()
 
 
-def update_reversed(cur, rows: list[tuple]) -> int:
-    """Swap home/away on CORE.FIXTURES (+ the identity provenance columns) to
-    the current IMPECT orientation for `rows` from fetch_reversed. Caller owns the
-    transaction."""
+_REID_FROM = """
+        FROM CAFC_DB.CORE.FIXTURES f
+        JOIN CAFC_DB.CORE.FIXTURE_IDENTITIES fi
+               ON fi.CAFC_FIXTURE_ID = f.CAFC_FIXTURE_ID
+              AND fi.SOURCE_SYSTEM = 'IMPECT'
+              AND fi.IS_PRIMARY
+        JOIN CAFC_DB.IMPECT_RAW.MATCHES m
+               ON TO_VARCHAR(m.ID) = fi.SOURCE_FIXTURE_ID
+        WHERE f.CREATED_FROM_SOURCE = 'IMPECT'
+          AND m.HOMESQUADID IS NOT NULL
+          AND m.AWAYSQUADID IS NOT NULL
+          AND m.HOMESQUADID <> m.AWAYSQUADID
+          AND (f.HOME_SQUAD_ID <> m.HOMESQUADID OR f.AWAY_SQUAD_ID <> m.AWAYSQUADID)
+          -- pure home/away flips are fetch_reversed's job
+          AND NOT (f.HOME_SQUAD_ID = m.AWAYSQUADID AND f.AWAY_SQUAD_ID = m.HOMESQUADID)
+"""
+
+
+def fetch_reid(cur, include_womens: bool = False) -> list[tuple]:
+    """Linked IMPECT fixtures whose squad id(s) changed in IMPECT_RAW.MATCHES
+    and where BOTH current IMPECT squads resolve in CORE_SQUADS (MALE unless
+    include_womens). Same row shape as fetch_reversed."""
+    cur.execute(f"""
+        SELECT
+            f.CAFC_FIXTURE_ID,
+            fi.FIXTURE_IDENTITY_ID,
+            m.ID,
+            m.HOMESQUADID,
+            m.AWAYSQUADID,
+            TRY_TO_TIMESTAMP_NTZ(m.SCHEDULEDDATE)
+        {_REID_FROM}
+          AND EXISTS (SELECT 1 FROM CAFC_DB.CORE.CORE_SQUADS hs
+                      WHERE hs.CAFC_SQUAD_ID = m.HOMESQUADID {_squad_gender("hs", include_womens)})
+          AND EXISTS (SELECT 1 FROM CAFC_DB.CORE.CORE_SQUADS aws
+                      WHERE aws.CAFC_SQUAD_ID = m.AWAYSQUADID {_squad_gender("aws", include_womens)})
+        ORDER BY f.CAFC_FIXTURE_ID
+    """)
+    return cur.fetchall()
+
+
+def count_reid_blocked(cur, include_womens: bool = False) -> int:
+    """Diagnostics only -- squad-changed fixtures that fetch_reid refuses
+    because a current IMPECT squad doesn't resolve in CORE_SQUADS."""
+    cur.execute(f"""
+        SELECT COUNT(*)
+        {_REID_FROM}
+          AND NOT (
+                EXISTS (SELECT 1 FROM CAFC_DB.CORE.CORE_SQUADS hs
+                        WHERE hs.CAFC_SQUAD_ID = m.HOMESQUADID {_squad_gender("hs", include_womens)})
+            AND EXISTS (SELECT 1 FROM CAFC_DB.CORE.CORE_SQUADS aws
+                        WHERE aws.CAFC_SQUAD_ID = m.AWAYSQUADID {_squad_gender("aws", include_womens)}))
+    """)
+    return int(cur.fetchone()[0])
+
+
+def update_squads(cur, rows: list[tuple]) -> int:
+    """Point CORE.FIXTURES (+ the identity provenance columns) at the current
+    IMPECT home/away squads for `rows` from fetch_reversed / fetch_reid. Dates
+    are never touched. Caller owns the transaction."""
     if not rows:
         return 0
 
@@ -233,6 +299,10 @@ def run(dry_run: bool = True, include_womens: bool = False, run_id: int | None =
             log.info("  skipped: %s", skipped)
             flipped = fetch_reversed(cur)
             log.info("  %d linked fixture(s) have home/away reversed vs IMPECT.", len(flipped))
+            reid = fetch_reid(cur, include_womens)
+            reid_blocked = count_reid_blocked(cur, include_womens)
+            log.info("  %d linked fixture(s) have re-IDed squads to sync; %d blocked "
+                     "(new squad not in CORE_SQUADS).", len(reid), reid_blocked)
 
             if dry_run:
                 print()
@@ -242,11 +312,14 @@ def run(dry_run: bool = True, include_womens: bool = False, run_id: int | None =
                 print(f"  Linkable IMPECT fixtures to mint: {len(rows)}")
                 print(f"  Skipped (missing squad id):       {skipped['missing_squad_id']}")
                 print(f"  Skipped (unparseable date):       {skipped['unparseable_date']}")
-                print(f"  Linked fixtures to re-sync:       {len(flipped)}")
+                print(f"  Linked fixtures, home/away flip:  {len(flipped)}")
+                print(f"  Linked fixtures, squad re-ID:     {len(reid)}")
+                print(f"  Squad re-ID blocked (unresolved): {reid_blocked}")
                 print()
                 return {"minted": 0, "skipped_missing_squad": skipped["missing_squad_id"],
                         "skipped_bad_date": skipped["unparseable_date"], "would_mint": len(rows),
-                        "would_resync": len(flipped)}
+                        "would_resync": len(flipped), "would_reid": len(reid),
+                        "reid_blocked": reid_blocked}
 
             owns_envelope = run_id is None
             if owns_envelope:
@@ -262,7 +335,8 @@ def run(dry_run: bool = True, include_womens: bool = False, run_id: int | None =
                 log.info("Opened INGESTION_RUNS.RUN_ID = %d", run_id)
 
             minted = mint_fixtures_bulk(cur, rows, run_id=run_id)
-            resynced = update_reversed(cur, flipped)
+            resynced = update_squads(cur, flipped)
+            reided = update_squads(cur, reid)
 
             if owns_envelope:
                 cur.execute(
@@ -275,8 +349,9 @@ def run(dry_run: bool = True, include_womens: bool = False, run_id: int | None =
                 )
                 conn.commit()
 
-            log.info("Applied (RUN_ID=%s): minted=%d resynced=%d", run_id, minted, resynced)
-            return {"minted": minted, "resynced": resynced, "skipped_missing_squad": skipped["missing_squad_id"],
+            log.info("Applied (RUN_ID=%s): minted=%d flipped=%d reided=%d",
+                     run_id, minted, resynced, reided)
+            return {"minted": minted, "resynced": resynced, "reided": reided, "skipped_missing_squad": skipped["missing_squad_id"],
                      "skipped_bad_date": skipped["unparseable_date"]}
     finally:
         conn.close()
