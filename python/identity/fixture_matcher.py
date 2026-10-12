@@ -21,10 +21,11 @@ that doesn't parse — these are IMPECT data-quality gaps, not this script's
 job to guess at. Logged and left unlinked; safe to re-run once the raw data
 is fixed upstream.
 
-Already-linked fixtures are re-synced too: IMPECT sometimes corrects a match's
-home/away squads or date after it was minted, so any IMPECT-created fixture
-whose squads/date differ from IMPECT_RAW.MATCHES is updated in place (see
-fetch_drifted / update_drifted). MANUAL and merged fixtures are never touched.
+Already-linked fixtures get one correction: IMPECT sometimes flips a match's
+home/away after it was minted, so any IMPECT-created fixture whose two squads
+are the reverse of IMPECT_RAW.MATCHES is swapped back in place (see
+fetch_reversed / update_reversed). Squad re-IDs and rescheduled dates are
+deliberately NOT synced. MANUAL and merged fixtures are never touched.
 
 Run with the default (no --apply) for a read-only count; --apply to write.
 """
@@ -70,12 +71,11 @@ def fetch_unlinked(cur, include_womens: bool) -> list[tuple]:
     return cur.fetchall()
 
 
-def fetch_drifted(cur) -> list[tuple]:
-    """Already-linked IMPECT fixtures whose home/away squads or date in
-    IMPECT_RAW.MATCHES no longer match CORE.FIXTURES (IMPECT corrects these
-    after the fact). Returns (cafc_fixture_id, identity_id, match_id,
-    home_squad_id, away_squad_id, scheduled_at) with the *current* IMPECT
-    values. Only IMPECT-created fixtures with a primary IMPECT identity are
+def fetch_reversed(cur) -> list[tuple]:
+    """Already-linked IMPECT fixtures whose home and away squads are the exact
+    reverse of IMPECT_RAW.MATCHES (IMPECT flipped them after the mint). Returns
+    (cafc_fixture_id, identity_id, match_id, home_squad_id, away_squad_id,
+    scheduled_at) with the *current* IMPECT values. Only IMPECT-created fixtures with a primary IMPECT identity are
     considered; MANUAL / merged fixtures are never touched."""
     cur.execute("""
         SELECT
@@ -96,17 +96,17 @@ def fetch_drifted(cur) -> list[tuple]:
           AND m.HOMESQUADID IS NOT NULL
           AND m.AWAYSQUADID IS NOT NULL
           AND TRY_TO_TIMESTAMP_NTZ(m.SCHEDULEDDATE) IS NOT NULL
-          AND (   f.HOME_SQUAD_ID <> m.HOMESQUADID
-               OR f.AWAY_SQUAD_ID <> m.AWAYSQUADID
-               OR f.FIXTURE_DATE  <> TRY_TO_TIMESTAMP_NTZ(m.SCHEDULEDDATE))
+          AND f.HOME_SQUAD_ID = m.AWAYSQUADID
+          AND f.AWAY_SQUAD_ID = m.HOMESQUADID
+          AND f.HOME_SQUAD_ID <> f.AWAY_SQUAD_ID
         ORDER BY f.CAFC_FIXTURE_ID
     """)
     return cur.fetchall()
 
 
-def update_drifted(cur, rows: list[tuple]) -> int:
-    """Re-sync CORE.FIXTURES (+ the identity provenance columns) to the
-    current IMPECT values for `rows` from fetch_drifted. Caller owns the
+def update_reversed(cur, rows: list[tuple]) -> int:
+    """Swap home/away on CORE.FIXTURES (+ the identity provenance columns) to
+    the current IMPECT orientation for `rows` from fetch_reversed. Caller owns the
     transaction."""
     if not rows:
         return 0
@@ -116,23 +116,21 @@ def update_drifted(cur, rows: list[tuple]) -> int:
         UPDATE CAFC_DB.CORE.FIXTURES
            SET HOME_SQUAD_ID = %(home)s,
                AWAY_SQUAD_ID = %(away)s,
-               FIXTURE_DATE  = %(sched)s,
                UPDATED_AT    = CURRENT_TIMESTAMP()
          WHERE CAFC_FIXTURE_ID = %(fid)s
         """,
-        [{"fid": fid, "home": home, "away": away, "sched": sched}
-         for fid, _iid, _mid, home, away, sched in rows],
+        [{"fid": fid, "home": home, "away": away}
+         for fid, _iid, _mid, home, away, _sched in rows],
     )
     cur.executemany(
         """
         UPDATE CAFC_DB.CORE.FIXTURE_IDENTITIES
            SET SOURCE_HOME_SQUAD_ID = %(home)s,
-               SOURCE_AWAY_SQUAD_ID = %(away)s,
-               SOURCE_FIXTURE_DATE  = %(sched)s
+               SOURCE_AWAY_SQUAD_ID = %(away)s
          WHERE FIXTURE_IDENTITY_ID = %(iid)s
         """,
-        [{"iid": iid, "home": str(home), "away": str(away), "sched": sched}
-         for _fid, iid, _mid, home, away, sched in rows],
+        [{"iid": iid, "home": str(home), "away": str(away)}
+         for _fid, iid, _mid, home, away, _sched in rows],
     )
     return len(rows)
 
@@ -233,8 +231,8 @@ def run(dry_run: bool = True, include_womens: bool = False, run_id: int | None =
             skipped = count_skipped(cur, include_womens)
             log.info("  %d linkable%s.", len(rows), "" if include_womens else " (women's excluded)")
             log.info("  skipped: %s", skipped)
-            drifted = fetch_drifted(cur)
-            log.info("  %d linked fixture(s) drifted from IMPECT (home/away/date).", len(drifted))
+            flipped = fetch_reversed(cur)
+            log.info("  %d linked fixture(s) have home/away reversed vs IMPECT.", len(flipped))
 
             if dry_run:
                 print()
@@ -244,11 +242,11 @@ def run(dry_run: bool = True, include_womens: bool = False, run_id: int | None =
                 print(f"  Linkable IMPECT fixtures to mint: {len(rows)}")
                 print(f"  Skipped (missing squad id):       {skipped['missing_squad_id']}")
                 print(f"  Skipped (unparseable date):       {skipped['unparseable_date']}")
-                print(f"  Linked fixtures to re-sync:       {len(drifted)}")
+                print(f"  Linked fixtures to re-sync:       {len(flipped)}")
                 print()
                 return {"minted": 0, "skipped_missing_squad": skipped["missing_squad_id"],
                         "skipped_bad_date": skipped["unparseable_date"], "would_mint": len(rows),
-                        "would_resync": len(drifted)}
+                        "would_resync": len(flipped)}
 
             owns_envelope = run_id is None
             if owns_envelope:
@@ -264,7 +262,7 @@ def run(dry_run: bool = True, include_womens: bool = False, run_id: int | None =
                 log.info("Opened INGESTION_RUNS.RUN_ID = %d", run_id)
 
             minted = mint_fixtures_bulk(cur, rows, run_id=run_id)
-            resynced = update_drifted(cur, drifted)
+            resynced = update_reversed(cur, flipped)
 
             if owns_envelope:
                 cur.execute(
