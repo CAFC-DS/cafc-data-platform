@@ -35,7 +35,6 @@ def get_connection():
         warehouse=config.SNOWFLAKE_WAREHOUSE,
         role=config.SNOWFLAKE_ROLE,
         ocsp_fail_open=True,
-        insecure_mode=True
     )
     return conn
 
