@@ -6,7 +6,7 @@ the same secrets power both the IMPECT extractor and the identity loader.
 Uses RSA key-pair auth to match the existing extractor pattern.
 
 Anyone needing a connection should call get_connection() rather than
-constructing one by hand — keeps insecure_mode / ocsp settings consistent.
+constructing one by hand — keeps ocsp / keep-alive settings consistent.
 """
 
 from __future__ import annotations
@@ -70,7 +70,6 @@ def get_connection(
         database=database   or os.getenv("SNOWFLAKE_DATABASE", "CAFC_DB"),
         schema=schema       or os.getenv("SNOWFLAKE_SCHEMA", "CORE"),
         ocsp_fail_open=True,
-        insecure_mode=True,
         # Confirmed live (2026-07-29): a single connection held open for a
         # ~5-hour SkillCorner backfill died with "Authentication token has
         # expired" right at the very end (2995/3005 matches already loaded)
