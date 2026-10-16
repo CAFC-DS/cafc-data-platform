@@ -20,7 +20,10 @@
     table, prefer overrides.cafc_player_id, fall back to identities.
 */
 
-{{ config(materialized='view') }}
+{{ config(
+    materialized='view',
+    grants={'select': ['APP_ROLE']} if target.name == 'prod' else {}
+) }}
 
 with overrides as (
     select
