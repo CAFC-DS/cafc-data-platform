@@ -20,7 +20,10 @@
   players with no IMPECT PLAYERS row at all (manually-added/internal players).
 */
 
-{{ config(materialized='table') }}
+{{ config(
+    materialized='table',
+    grants={'select': ['APP_ROLE']} if target.name == 'prod' else {}
+) }}
 
 with stg as (
     select * from {{ ref('stg_impect__players') }}

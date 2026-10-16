@@ -18,7 +18,10 @@
   given events don't carry a wall-clock match date directly.
 */
 
-{{ config(materialized='table') }}
+{{ config(
+    materialized='table',
+    grants={'select': ['APP_ROLE']} if target.name == 'prod' else {}
+) }}
 
 with stg as (
     select * from {{ ref('stg_impect__events') }}
