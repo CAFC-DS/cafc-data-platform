@@ -299,6 +299,22 @@ def test_queue_refresh_skips_future_matches_and_counts_new_ones():
     assert rows[0]["COMPETITION_NAME"] == "Major League Soccer" and rows[0]["SEASON"] == "2026"
 
 
+def test_queue_refresh_merges_through_the_requested_stage_schema(monkeypatch):
+    merged = {}
+    iterations = [{"id": 7, "season": "26/27", "competition": {"name": "Championship"}},
+                  {"id": 8, "season": "25/26", "competition": {"name": "Championship"}}]
+    monkeypatch.setattr(rq.bf, "_target_iterations", lambda ids: iterations)
+    monkeypatch.setattr(rq, "_existing", lambda ids: (set(), set()))
+    monkeypatch.setattr(rq.bf.api, "get_matches", lambda iteration_id: {"data": [
+        {"id": iteration_id * 100, "scheduledDate": "2026-09-01T15:00:00Z"}]})
+    monkeypatch.setattr(rq.bf, "_stage_and_merge",
+                        lambda rows, schema: merged.update(rows=rows, schema=schema) or len(rows))
+
+    assert rq.refresh({"26/27"}, set(), apply=True, stage_schema="IMPECT_RAW") == 1
+    assert merged["schema"] == "IMPECT_RAW" and [r["MATCH_ID"] for r in merged["rows"]] == [700]
+    assert rq.refresh({"1999"}, set(), apply=True) is None
+
+
 def test_missing_countries_are_filled_from_the_api_iteration_list():
     rows = [_row(1, "26/27", None), _row(2, "26/27", 393), _row(3, "26/27", None)]
     api_iterations = [{"id": 1, "competition": {"countryId": 462}}, {"id": 2, "competition": {"countryId": 1}},

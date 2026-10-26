@@ -61,23 +61,14 @@ def _existing(iteration_ids: list[int]) -> tuple[set[int], set[int]]:
         conn.close()
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--seasons", help="Comma-separated season labels, e.g. 26/27,2026.")
-    parser.add_argument("--iteration-ids", help="Comma-separated IMPECT iteration ids.")
-    parser.add_argument("--apply", action="store_true", help="Write to the queue (default: report only).")
-    args = parser.parse_args(argv)
-    if not (args.seasons or args.iteration_ids):
-        parser.error("pass --seasons and/or --iteration-ids")
-    os.environ.setdefault("SNOWFLAKE_QUERY_TAG", "project=cafc-data-platform;job=impect-queue-refresh")
-
-    wanted_ids = {int(v) for v in args.iteration_ids.split(",") if v.strip()} if args.iteration_ids else set()
-    wanted_seasons = {v.strip() for v in args.seasons.split(",") if v.strip()} if args.seasons else set()
+def refresh(seasons: set[str], iteration_ids: set[int], apply: bool,
+            stage_schema: str = bf.QUEUE_SCHEMA) -> int | None:
+    """Queue the completed matches of the matching iterations; returns the new-row count, or None if none match."""
     iterations = [it for it in bf._target_iterations(None)
-                  if int(it["id"]) in wanted_ids or it.get("season") in wanted_seasons]
+                  if int(it["id"]) in iteration_ids or it.get("season") in seasons]
     if not iterations:
         print("no matching iterations")
-        return 1
+        return None
 
     queued, loaded = _existing([int(it["id"]) for it in iterations])
     now = datetime.now(timezone.utc)
@@ -92,11 +83,26 @@ def main(argv: list[str] | None = None) -> int:
             print(f"iteration {iteration['id']} {bf._nested(iteration, 'competition.name')} {iteration.get('season')}: "
                   f"completed={counts['completed']} new_to_queue={counts['new']} future={counts['future']}")
     print(f"{len(iterations)} iterations, {len(all_rows)} completed matches, {total_new} new to the queue")
-    if args.apply:
-        print(f"merged {bf._stage_and_merge(all_rows)} rows")
+    if apply:
+        print(f"merged {bf._stage_and_merge(all_rows, stage_schema)} rows")
     else:
         print("dry run: nothing written (pass --apply)")
-    return 0
+    return total_new
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--seasons", help="Comma-separated season labels, e.g. 26/27,2026.")
+    parser.add_argument("--iteration-ids", help="Comma-separated IMPECT iteration ids.")
+    parser.add_argument("--apply", action="store_true", help="Write to the queue (default: report only).")
+    args = parser.parse_args(argv)
+    if not (args.seasons or args.iteration_ids):
+        parser.error("pass --seasons and/or --iteration-ids")
+    os.environ.setdefault("SNOWFLAKE_QUERY_TAG", "project=cafc-data-platform;job=impect-queue-refresh")
+
+    wanted_ids = {int(v) for v in args.iteration_ids.split(",") if v.strip()} if args.iteration_ids else set()
+    wanted_seasons = {v.strip() for v in args.seasons.split(",") if v.strip()} if args.seasons else set()
+    return 1 if refresh(wanted_seasons, wanted_ids, args.apply) is None else 0
 
 
 if __name__ == "__main__":

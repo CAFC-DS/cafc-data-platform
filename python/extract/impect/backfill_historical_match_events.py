@@ -105,14 +105,19 @@ def _already_loaded_match_ids() -> set[int]:
         conn.close()
 
 
-def _stage_and_merge(rows: list[dict]) -> int:
+def _stage_and_merge(rows: list[dict], stage_schema: str = QUEUE_SCHEMA) -> int:
+    """Merge queue rows via a temporary table created in ``stage_schema``.
+
+    BACKFILL_ROLE can create temporary objects only in IMPECT_RAW, so the Railway
+    queue refresh stages there; developer roles keep the CORE default.
+    """
     if not rows:
         return 0
     df = pd.DataFrame(rows)
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(f"USE SCHEMA {config.SNOWFLAKE_DATABASE}.{QUEUE_SCHEMA}")
+            cur.execute(f"USE SCHEMA {config.SNOWFLAKE_DATABASE}.{stage_schema}")
             cur.execute(
                 """
                 CREATE TEMPORARY TABLE IMPECT_EVENT_BACKFILL_QUEUE_STAGE (
@@ -123,7 +128,7 @@ def _stage_and_merge(rows: list[dict]) -> int:
             )
         success, _, count, output = write_pandas(
             conn=conn, df=df, table_name="IMPECT_EVENT_BACKFILL_QUEUE_STAGE",
-            database=config.SNOWFLAKE_DATABASE, schema=QUEUE_SCHEMA,
+            database=config.SNOWFLAKE_DATABASE, schema=stage_schema,
             overwrite=False, auto_create_table=False,
         )
         if not success:

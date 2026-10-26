@@ -320,7 +320,7 @@ def supervisor(monkeypatch):
         monkeypatch.setenv(name, "x")
     for name in ("BACKFILL_ITERATION_IDS", "BACKFILL_SEASONS", "BACKFILL_MAX_MATCHES", "BACKFILL_MAX_MINUTES",
                  "BACKFILL_MAX_STALLED_MINUTES", "BACKFILL_WORKERS", "BACKFILL_PLAN", "BACKFILL_BLOCKS",
-                 "BACKFILL_DRY_RUN", "BACKFILL_QUERY_TAG"):
+                 "BACKFILL_DRY_RUN", "BACKFILL_QUERY_TAG", "BACKFILL_REFRESH_QUEUE"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("BACKFILL_ITERATION_IDS", "10,20")
     monkeypatch.setattr(rb, "release_stale_claims", lambda ids, minutes: 0)
@@ -377,6 +377,52 @@ def test_supervisor_refuses_to_start_without_scope_or_credentials(supervisor, mo
     monkeypatch.setenv("BACKFILL_ITERATION_IDS", "10")
     monkeypatch.delenv("IMPECT_PASSWORD")
     assert rb.supervise() == 1
+
+
+@pytest.fixture()
+def refresh_calls(supervisor, monkeypatch):
+    import refresh_backfill_queue as rq
+
+    calls = []
+
+    def fake_refresh(seasons, iteration_ids, apply, stage_schema):
+        calls.append({"seasons": seasons, "ids": iteration_ids, "apply": apply, "schema": stage_schema})
+        return 3
+
+    monkeypatch.setattr(rq, "refresh", fake_refresh)
+    monkeypatch.setenv("BACKFILL_REFRESH_QUEUE", "1")
+    return calls
+
+
+def test_refresh_queue_runs_before_workers_and_stages_in_impect_raw(supervisor, refresh_calls, monkeypatch):
+    monkeypatch.delenv("BACKFILL_ITERATION_IDS")
+    monkeypatch.setenv("BACKFILL_SEASONS", "26/27,2026")
+    monkeypatch.setattr(rb, "resolve_scope", lambda: [10, 20])
+    supervisor([_counts(0, 5)])
+
+    assert rb.supervise() == 0
+    assert refresh_calls == [{"seasons": {"26/27", "2026"}, "ids": set(), "apply": True, "schema": "IMPECT_RAW"}]
+
+
+def test_refresh_queue_only_reports_on_a_dry_run(supervisor, refresh_calls, monkeypatch):
+    monkeypatch.setenv("BACKFILL_DRY_RUN", "1")
+    supervisor([_counts(0, 5)])
+
+    assert rb.supervise() == 0
+    assert refresh_calls[0]["apply"] is False and refresh_calls[0]["ids"] == {10, 20}
+
+
+def test_a_failed_refresh_stops_before_any_worker_starts(supervisor, refresh_calls, monkeypatch):
+    import refresh_backfill_queue as rq
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("Insufficient privileges")
+
+    monkeypatch.setattr(rq, "refresh", boom)
+    supervisor([])
+
+    assert rb.supervise() == 1
+    assert FakeProc.started == []
 
 
 def test_scope_resolution_unions_ids_and_seasons(monkeypatch):

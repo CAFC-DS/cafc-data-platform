@@ -173,6 +173,16 @@ python refresh_backfill_queue.py --seasons 26/27,2026            # dry run
 python refresh_backfill_queue.py --seasons 26/27,2026 --apply
 ```
 
+Or let the Railway service do it at start-up: set `BACKFILL_REFRESH_QUEUE=1` with
+`BACKFILL_SEASONS=26/27,2026` (and no `BACKFILL_PLAN`, whose iteration list is fixed when it is
+generated). The service refreshes the queue for those seasons, then backfills every queued iteration of
+them. With `BACKFILL_DRY_RUN=1` it only reports how many matches are new. It stages in `IMPECT_RAW`,
+so `BACKFILL_ROLE` needs one more grant:
+
+```sql
+GRANT INSERT ON TABLE CAFC_DB.CORE.IMPECT_EVENT_BACKFILL_QUEUE TO ROLE BACKFILL_ROLE;  -- queue refresh only
+```
+
 Run one block per deployment, check the block's logs and credits, then move `BACKFILL_BLOCKS` to the next.
 
 Operational notes:

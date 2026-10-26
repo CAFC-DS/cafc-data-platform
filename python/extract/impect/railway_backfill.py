@@ -12,6 +12,12 @@ Scope (one of these):
   BACKFILL_SEASONS         comma-separated queue SEASON labels (single scope), e.g. "25/26,2025"
   BACKFILL_DRY_RUN=1       print each stage's live counts and exit without starting workers
 
+  BACKFILL_REFRESH_QUEUE=1 first add newly completed matches (and new iterations) of
+                           BACKFILL_SEASONS / BACKFILL_ITERATION_IDS to the queue
+                           (refresh_backfill_queue.py), so a season still being played is
+                           backfilled up to today.  With BACKFILL_DRY_RUN it only reports.
+                           Needs INSERT on the queue table for the service's role.
+
 Exit codes: 0 when the scope is drained, or a match/time budget was reached;
 1 when a stage cannot progress (stalled; later stages still run) or the configuration is wrong.
 
@@ -316,6 +322,29 @@ def _run_scope(label: str, iteration_ids: list[int], cfg: _Settings, budget: _Bu
             time.sleep(cfg.idle_poll_seconds)
 
 
+def refresh_queue(dry_run: bool) -> bool:
+    """Queue newly completed matches for the season/id scope; False if it could not run.
+
+    Stages in IMPECT_RAW, where BACKFILL_ROLE may create temporary objects.
+    """
+    seasons = set(_csv(os.environ.get("BACKFILL_SEASONS")))
+    iteration_ids = {int(part) for part in _csv(os.environ.get("BACKFILL_ITERATION_IDS"))}
+    if not (seasons or iteration_ids):
+        print("BACKFILL_REFRESH_QUEUE needs BACKFILL_SEASONS or BACKFILL_ITERATION_IDS", flush=True)
+        return False
+    import backfill_historical_match_events as bf
+    import refresh_backfill_queue
+
+    bf.get_connection = get_connection
+    print(f"refreshing the queue for seasons={sorted(seasons)} iteration_ids={sorted(iteration_ids)}", flush=True)
+    try:
+        return refresh_backfill_queue.refresh(seasons, iteration_ids, apply=not dry_run,
+                                              stage_schema="IMPECT_RAW") is not None
+    except Exception as exc:  # noqa: BLE001
+        print(f"queue refresh failed: {exc}", flush=True)
+        return False
+
+
 def _build_stages(cfg: _Settings) -> list[dict]:
     """The ordered scopes to run: plan stages, or one stage from the id/season variables."""
     plan_path = os.environ.get("BACKFILL_PLAN")
@@ -343,6 +372,9 @@ def supervise() -> int:
 
     cfg = _Settings()
     os.environ.setdefault("SNOWFLAKE_QUERY_TAG", cfg.base_tag)
+    refresh = os.environ.get("BACKFILL_REFRESH_QUEUE", "").lower() in ("1", "true", "yes")
+    if refresh and not refresh_queue(cfg.dry_run):
+        return 1
     try:
         stages = _build_stages(cfg)
     except (OSError, ValueError) as exc:
