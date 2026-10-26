@@ -13,7 +13,12 @@
     from the most-recent season (assumption: name doesn't drift much).
 */
 
-{{ config(materialized='table') }}
+-- APP_ROLE reads this for the player position-history endpoint. Additive
+-- post-hook grant (not `grants=`) so other roles' existing SELECT is untouched.
+{{ config(
+    materialized='table',
+    post_hook=("grant select on {{ this }} to role APP_ROLE" if target.name == 'prod' else '')
+) }}
 
 with stg as (
     select
