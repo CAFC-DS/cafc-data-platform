@@ -453,6 +453,8 @@ def test_scope_resolution_unions_ids_and_seasons(monkeypatch):
 def test_queue_merge_stages_naive_utc_timestamps(monkeypatch):
     from datetime import datetime, timedelta, timezone
 
+    import pandas as pd
+
     seen = {}
 
     class Cursor:
@@ -492,6 +494,6 @@ def test_queue_merge_stages_naive_utc_timestamps(monkeypatch):
     assert bf._stage_and_merge(rows, "IMPECT_RAW") == 2
     scheduled = seen["df"]["SCHEDULED_AT"]
     assert scheduled.dt.tz is None
-    assert scheduled.iloc[0] == datetime(2026, 8, 1, 14, 0)     # converted to UTC, then made naive
+    assert scheduled.iloc[0] == pd.Timestamp("2026-08-01 14:00")  # converted to UTC, then made naive
     assert scheduled.isna().iloc[1]
     assert seen["kwargs"]["use_logical_type"] is True and seen["kwargs"]["schema"] == "IMPECT_RAW"
