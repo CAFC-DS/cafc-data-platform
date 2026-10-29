@@ -183,6 +183,11 @@ so `BACKFILL_ROLE` needs one more grant:
 GRANT INSERT ON TABLE CAFC_DB.CORE.IMPECT_EVENT_BACKFILL_QUEUE TO ROLE BACKFILL_ROLE;  -- queue refresh only
 ```
 
+The refresh also puts `NO_EVENT_DATA` matches played in the last `BACKFILL_RETRY_NO_EVENT_DAYS` (default 14)
+back to `PENDING`: IMPECT publishes events a day or more after a match, so a run soon after a matchday
+would otherwise mark those games finished with no events. With these settings the service can run on a
+Railway cron schedule (e.g. weekly) to keep the current season up to date.
+
 Run one block per deployment, check the block's logs and credits, then move `BACKFILL_BLOCKS` to the next.
 
 Operational notes:

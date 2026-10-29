@@ -320,7 +320,7 @@ def supervisor(monkeypatch):
         monkeypatch.setenv(name, "x")
     for name in ("BACKFILL_ITERATION_IDS", "BACKFILL_SEASONS", "BACKFILL_MAX_MATCHES", "BACKFILL_MAX_MINUTES",
                  "BACKFILL_MAX_STALLED_MINUTES", "BACKFILL_WORKERS", "BACKFILL_PLAN", "BACKFILL_BLOCKS",
-                 "BACKFILL_DRY_RUN", "BACKFILL_QUERY_TAG", "BACKFILL_REFRESH_QUEUE"):
+                 "BACKFILL_DRY_RUN", "BACKFILL_QUERY_TAG", "BACKFILL_REFRESH_QUEUE", "BACKFILL_RETRY_NO_EVENT_DAYS"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("BACKFILL_ITERATION_IDS", "10,20")
     monkeypatch.setattr(rb, "release_stale_claims", lambda ids, minutes: 0)
@@ -385,8 +385,9 @@ def refresh_calls(supervisor, monkeypatch):
 
     calls = []
 
-    def fake_refresh(seasons, iteration_ids, apply, stage_schema):
-        calls.append({"seasons": seasons, "ids": iteration_ids, "apply": apply, "schema": stage_schema})
+    def fake_refresh(seasons, iteration_ids, apply, stage_schema, retry_no_event_days):
+        calls.append({"seasons": seasons, "ids": iteration_ids, "apply": apply, "schema": stage_schema,
+                      "retry_days": retry_no_event_days})
         return 3
 
     monkeypatch.setattr(rq, "refresh", fake_refresh)
@@ -401,15 +402,18 @@ def test_refresh_queue_runs_before_workers_and_stages_in_impect_raw(supervisor, 
     supervisor([_counts(0, 5)])
 
     assert rb.supervise() == 0
-    assert refresh_calls == [{"seasons": {"26/27", "2026"}, "ids": set(), "apply": True, "schema": "IMPECT_RAW"}]
+    assert refresh_calls == [{"seasons": {"26/27", "2026"}, "ids": set(), "apply": True, "schema": "IMPECT_RAW",
+                              "retry_days": 14}]
 
 
 def test_refresh_queue_only_reports_on_a_dry_run(supervisor, refresh_calls, monkeypatch):
     monkeypatch.setenv("BACKFILL_DRY_RUN", "1")
+    monkeypatch.setenv("BACKFILL_RETRY_NO_EVENT_DAYS", "0")
     supervisor([_counts(0, 5)])
 
     assert rb.supervise() == 0
     assert refresh_calls[0]["apply"] is False and refresh_calls[0]["ids"] == {10, 20}
+    assert refresh_calls[0]["retry_days"] == 0
 
 
 def test_a_failed_refresh_stops_before_any_worker_starts(supervisor, refresh_calls, monkeypatch):
@@ -497,3 +501,48 @@ def test_queue_merge_stages_naive_utc_timestamps(monkeypatch):
     assert scheduled.iloc[0] == pd.Timestamp("2026-08-01 14:00")  # converted to UTC, then made naive
     assert scheduled.isna().iloc[1]
     assert seen["kwargs"]["use_logical_type"] is True and seen["kwargs"]["schema"] == "IMPECT_RAW"
+
+
+def _recording_conn(seen, count=0, rowcount=0):
+    class Cursor:
+        def execute(self, sql, params=None):
+            seen.setdefault("sql", []).append(sql)
+            self.rowcount = rowcount
+
+        def fetchone(self):
+            return (count,)
+
+    class Conn:
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            seen["committed"] = True
+
+        def close(self):
+            pass
+
+    return Conn
+
+
+def test_recent_no_event_matches_are_requeued_within_the_window(monkeypatch):
+    import refresh_backfill_queue as rq
+
+    seen = {}
+    monkeypatch.setattr(rq.bf, "get_connection", _recording_conn(seen, rowcount=7))
+
+    assert rq.retry_recent_no_event([10, 20], 14, apply=True) == 7
+    sql = " ".join(seen["sql"][0].split())
+    assert sql.startswith("UPDATE") and "SET STATUS='PENDING', ATTEMPT_COUNT=0" in sql
+    assert "STATUS = 'NO_EVENT_DATA' AND ITERATION_ID IN (10, 20)" in sql and "DATEADD(day, -14," in sql
+    assert seen["committed"]
+
+
+def test_requeue_dry_run_only_counts(monkeypatch):
+    import refresh_backfill_queue as rq
+
+    seen = {}
+    monkeypatch.setattr(rq.bf, "get_connection", _recording_conn(seen, count=4))
+
+    assert rq.retry_recent_no_event([10], 14, apply=False) == 4
+    assert seen["sql"][0].startswith("SELECT COUNT(*)") and "committed" not in seen

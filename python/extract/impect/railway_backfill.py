@@ -17,6 +17,8 @@ Scope (one of these):
                            (refresh_backfill_queue.py), so a season still being played is
                            backfilled up to today.  With BACKFILL_DRY_RUN it only reports.
                            Needs INSERT on the queue table for the service's role.
+  BACKFILL_RETRY_NO_EVENT_DAYS [14]  with the refresh, also requeue NO_EVENT_DATA matches
+                           played in the last N days (IMPECT publishes events late); 0 = off
 
 Exit codes: 0 when the scope is drained, or a match/time budget was reached;
 1 when a stage cannot progress (stalled; later stages still run) or the configuration is wrong.
@@ -338,8 +340,10 @@ def refresh_queue(dry_run: bool) -> bool:
     bf.get_connection = get_connection
     print(f"refreshing the queue for seasons={sorted(seasons)} iteration_ids={sorted(iteration_ids)}", flush=True)
     try:
-        return refresh_backfill_queue.refresh(seasons, iteration_ids, apply=not dry_run,
-                                              stage_schema="IMPECT_RAW") is not None
+        return refresh_backfill_queue.refresh(
+            seasons, iteration_ids, apply=not dry_run, stage_schema="IMPECT_RAW",
+            retry_no_event_days=_env_int("BACKFILL_RETRY_NO_EVENT_DAYS", 14),
+        ) is not None
     except Exception as exc:  # noqa: BLE001
         print(f"queue refresh failed: {exc}", flush=True)
         return False

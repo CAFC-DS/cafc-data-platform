@@ -61,9 +61,41 @@ def _existing(iteration_ids: list[int]) -> tuple[set[int], set[int]]:
         conn.close()
 
 
+def retry_recent_no_event(iteration_ids: list[int], days: int, apply: bool) -> int:
+    """Put NO_EVENT_DATA matches played in the last ``days`` back to PENDING.
+
+    IMPECT publishes events a day or more after a match, so a run soon after a
+    matchday marks those games NO_EVENT_DATA, which is otherwise terminal.
+    """
+    scope = ", ".join(str(value) for value in iteration_ids)
+    where = (f"STATUS = 'NO_EVENT_DATA' AND ITERATION_ID IN ({scope}) AND SCHEDULED_AT >= "
+             f"DATEADD(day, -{int(days)}, CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ)")
+    conn = bf.get_connection()
+    try:
+        cur = conn.cursor()
+        if not apply:
+            cur.execute(f"SELECT COUNT(*) FROM {bf.QUEUE_TABLE} WHERE {where}")
+            return int(cur.fetchone()[0])
+        cur.execute(
+            f"""
+            UPDATE {bf.QUEUE_TABLE}
+               SET STATUS='PENDING', ATTEMPT_COUNT=0, NEXT_ATTEMPT_AT=NULL, COMPLETED_AT=NULL,
+                   EVENT_COUNT=NULL, LAST_ERROR=NULL, UPDATED_AT=CURRENT_TIMESTAMP()
+             WHERE {where}
+            """
+        )
+        conn.commit()
+        return cur.rowcount or 0
+    finally:
+        conn.close()
+
+
 def refresh(seasons: set[str], iteration_ids: set[int], apply: bool,
-            stage_schema: str = bf.QUEUE_SCHEMA) -> int | None:
-    """Queue the completed matches of the matching iterations; returns the new-row count, or None if none match."""
+            stage_schema: str = bf.QUEUE_SCHEMA, retry_no_event_days: int = 0) -> int | None:
+    """Queue the completed matches of the matching iterations; returns the new-row count, or None if none match.
+
+    With ``retry_no_event_days``, recent NO_EVENT_DATA matches are also queued again.
+    """
     iterations = [it for it in bf._target_iterations(None)
                   if int(it["id"]) in iteration_ids or it.get("season") in seasons]
     if not iterations:
@@ -87,6 +119,10 @@ def refresh(seasons: set[str], iteration_ids: set[int], apply: bool,
         print(f"merged {bf._stage_and_merge(all_rows, stage_schema)} rows")
     else:
         print("dry run: nothing written (pass --apply)")
+    if retry_no_event_days:
+        retried = retry_recent_no_event([int(it["id"]) for it in iterations], retry_no_event_days, apply)
+        print(f"{'requeued' if apply else 'would requeue'} {retried} NO_EVENT_DATA match(es) "
+              f"from the last {retry_no_event_days} days")
     return total_new
 
 
@@ -95,6 +131,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seasons", help="Comma-separated season labels, e.g. 26/27,2026.")
     parser.add_argument("--iteration-ids", help="Comma-separated IMPECT iteration ids.")
     parser.add_argument("--apply", action="store_true", help="Write to the queue (default: report only).")
+    parser.add_argument("--retry-no-event-days", type=int, default=0,
+                        help="Also requeue NO_EVENT_DATA matches played in the last N days.")
     args = parser.parse_args(argv)
     if not (args.seasons or args.iteration_ids):
         parser.error("pass --seasons and/or --iteration-ids")
@@ -102,7 +140,8 @@ def main(argv: list[str] | None = None) -> int:
 
     wanted_ids = {int(v) for v in args.iteration_ids.split(",") if v.strip()} if args.iteration_ids else set()
     wanted_seasons = {v.strip() for v in args.seasons.split(",") if v.strip()} if args.seasons else set()
-    return 1 if refresh(wanted_seasons, wanted_ids, args.apply) is None else 0
+    return 1 if refresh(wanted_seasons, wanted_ids, args.apply,
+                        retry_no_event_days=args.retry_no_event_days) is None else 0
 
 
 if __name__ == "__main__":
