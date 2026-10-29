@@ -34,11 +34,14 @@
     that seed instead — provider-agnostic surrogate.
 */
 
+-- APP_ROLE reads this for the player position-history endpoint. Additive
+-- post-hook grant (not `grants=`, which would revoke other roles on increments).
 {{ config(
     materialized='incremental',
     unique_key=['cafc_player_id', 'cafc_fixture_id', 'cafc_kpi_id', 'impect_squad_id', 'position_code'],
     on_schema_change='append_new_columns',
-    incremental_strategy='merge'
+    incremental_strategy='merge',
+    post_hook=("grant select on {{ this }} to role APP_ROLE" if target.name == 'prod' else '')
 ) }}
 
 with stg as (
