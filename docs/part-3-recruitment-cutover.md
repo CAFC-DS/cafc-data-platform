@@ -1,6 +1,10 @@
 # Part 3 — Recruitment-platform cutover to the canonical layer
 
-**Status:** Data-platform prerequisites COMPLETE (2026-06-01) · App-side work NOT
+**Status (updated 2026-09-30):** historical roadmap. Most of the app-side work
+below has since shipped; only the `players`/`matches` reads remain. See
+`cafc-db-guide.md` for the current state. Original status line follows.
+
+**Original status:** Data-platform prerequisites COMPLETE (2026-06-01) · App-side work NOT
 STARTED. The canonical `CAFC_DB.CORE` layer and the full `CAFC_DB.APP_COMPAT`
 bridge are live in prod, dbt-managed and validated. The remaining work is all in
 the **recruitment-platform repo** (FastAPI + React — a separate codebase).

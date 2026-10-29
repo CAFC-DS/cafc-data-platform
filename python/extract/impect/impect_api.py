@@ -56,23 +56,43 @@ def save_token_cache(token: str, expires_in: int):
         'expiry': expiry.isoformat()
     }
 
-    with open(config.TOKEN_CACHE_FILE, 'w') as f:
+    # Write-then-rename so a concurrent reader (another worker process sharing
+    # this cache file) never sees a half-written token file.
+    tmp_path = f"{config.TOKEN_CACHE_FILE}.{os.getpid()}.tmp"
+    with open(tmp_path, 'w') as f:
         json.dump(token_data, f)
+    os.replace(tmp_path, config.TOKEN_CACHE_FILE)
+
+
+_token_lock = threading.Lock()
+TOKEN_REQUEST_ATTEMPTS = 3
 
 
 def get_auth_token() -> str:
     """
     Get OAuth2 access token (from cache or by requesting new one)
 
+    Single-flight within a process: when several fetch threads find the cache
+    empty at once (every worker does at start-up, and again after a token
+    expires), only one logs in and the rest reuse its token.  A login that the
+    server refuses or drops is retried briefly, because one transient failure
+    here would otherwise fail every match that happened to be in flight.
+
     Returns:
         OAuth2 access token
     """
-    # Try to load from cache
     cached = load_cached_token()
     if cached:
         return cached['token']
 
-    # Request new token
+    with _token_lock:
+        cached = load_cached_token()  # another thread may have just logged in
+        if cached:
+            return cached['token']
+        return _request_new_token()
+
+
+def _request_new_token() -> str:
     if not config.IMPECT_USERNAME or not config.IMPECT_PASSWORD:
         raise Exception("IMPECT_USERNAME and IMPECT_PASSWORD must be set in environment")
 
@@ -88,26 +108,36 @@ def get_auth_token() -> str:
         'Content-Type': 'application/x-www-form-urlencoded'
     }
 
-    try:
-        response = requests.post(
-            config.IMPECT_TOKEN_URL,
-            data=urlencode(data),
-            headers=headers,
-            timeout=config.REQUEST_TIMEOUT
-        )
-        response.raise_for_status()
-        token_response = response.json()
+    last_error: Optional[Exception] = None
+    for attempt in range(TOKEN_REQUEST_ATTEMPTS):
+        if attempt:
+            time.sleep(2 ** attempt)  # 2s, 4s
+            # a sibling process may have logged in while we waited
+            cached = load_cached_token()
+            if cached:
+                return cached['token']
+        try:
+            response = requests.post(
+                config.IMPECT_TOKEN_URL,
+                data=urlencode(data),
+                headers=headers,
+                timeout=config.REQUEST_TIMEOUT
+            )
+            response.raise_for_status()
+            token_response = response.json()
 
-        access_token = token_response['access_token']
-        expires_in = token_response.get('expires_in', 86400)  # Default 24 hours
+            access_token = token_response['access_token']
+            expires_in = token_response.get('expires_in', 86400)  # Default 24 hours
 
-        # Save to cache
-        save_token_cache(access_token, expires_in)
+            # Save to cache
+            save_token_cache(access_token, expires_in)
 
-        return access_token
+            return access_token
 
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"Failed to get authentication token: {str(e)}")
+        except requests.exceptions.RequestException as e:
+            last_error = e
+
+    raise Exception(f"Failed to get authentication token: {str(last_error)}")
 
 
 def get_auth_headers() -> Dict[str, str]:

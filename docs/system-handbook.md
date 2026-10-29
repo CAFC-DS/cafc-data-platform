@@ -3,7 +3,9 @@
 > The "read this in six months and understand everything" document.
 > Evergreen description of the system. For the dated architecture critique and
 > roadmap recommendations, see `architecture-review-2026-06.md`.
-> Last verified against the live estate: 2026-06-10.
+> Last verified against the live estate: 2026-06-10. **Migration status has moved
+> on since then. Start with `cafc-db-guide.md` (2026-09-30) for the current
+> state; the phase table in section 5 below is superseded by it.**
 
 ---
 
@@ -162,10 +164,14 @@ Cutover phases (each = one branch/PR in the recruitment repo):
 |---|---|---|
 | 0 | Seam only (no-op) | `feature/canonical-cutover-seam` ✅ built |
 | 1+2 | Read-only: search/profile/analytics + notes/intel | `feature/canonical-cutover-phase-1-2-reads` ✅ built & verified |
-| 3 | Scout reports + lists — **first writes into CORE**, app-owned tables physically move | not started |
-| 4 | Recommendations | not started |
-| 5 | Admin | not started |
+| 3 | Scout reports + lists — **first writes into CORE**, app-owned tables physically move | ✅ in app `main` (`core_table()`) |
+| 4 | Remaining app-owned tables (notes, stage history, recs, users, ...) | ✅ in app `main` (`core_table()`) |
+| 5 | Add Player / Add Match mint into CORE | ✅ in app `main` (`WRITES_TO_CORE`) |
+| 6 | Read `players` (66 sites) and `matches` (37 sites) from CORE, drop `APP_COMPAT` | ⏳ in progress (`core_fixture_details` built) |
 | — | 30-day quiet period → retire `RECRUITMENT_TEST` | — |
+
+_Status per 2026-09-30 check of app `main`. Whether the production Railway env
+vars point at `CAFC_DB` is unverified; see `cafc-db-guide.md` section 3._
 
 **Verification harness:** `backend/tools/cutover_compare/` (in the recruitment
 repo) logs into the app as all five roles, captures the key read endpoints under
