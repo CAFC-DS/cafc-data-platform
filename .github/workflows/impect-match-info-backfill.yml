@@ -1,0 +1,70 @@
+name: IMPECT match info backfill
+
+# Manual-only. Runs load_match_info.py --backfill-events, which loads
+# CAFC_DB.IMPECT_RAW.MATCH_INFO for matches that already have EVENTS rows but
+# no MATCH_INFO rows. Start with dry_run=true to see which matches it plans
+# to load, then re-run with dry_run=false.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "List the matches to load without writing to Snowflake"
+        type: boolean
+        default: true
+      limit:
+        description: "Optional: max number of matches to load (blank = all)"
+        type: string
+        default: ""
+
+concurrency:
+  group: impect-match-info-backfill
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: python/extract/impect
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        working-directory: .
+        run: pip install -e .
+
+      - name: Write Snowflake private key
+        env:
+          SNOWFLAKE_PRIVATE_KEY_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$SNOWFLAKE_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/snowflake_key.pem"
+          chmod 600 "$RUNNER_TEMP/snowflake_key.pem"
+
+      - name: Backfill match info
+        env:
+          IMPECT_USERNAME: ${{ secrets.IMPECT_USERNAME }}
+          IMPECT_PASSWORD: ${{ secrets.IMPECT_PASSWORD }}
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_DATABASE: CAFC_DB
+          DRY_RUN: ${{ inputs.dry_run }}
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          export SNOWFLAKE_PRIVATE_KEY_PATH="$RUNNER_TEMP/snowflake_key.pem"
+          args=(--backfill-events)
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          if [ -n "$LIMIT" ]; then args+=(--limit "$LIMIT"); fi
+          python load_match_info.py "${args[@]}"

@@ -42,7 +42,6 @@ def get_connection():
         # time so a CLI flag such as --query-tag can set it).
         session_parameters={"QUERY_TAG": os.getenv("SNOWFLAKE_QUERY_TAG") or DEFAULT_QUERY_TAG},
         ocsp_fail_open=True,
-        insecure_mode=True
     )
     return conn
 
