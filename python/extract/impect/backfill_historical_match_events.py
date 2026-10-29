@@ -114,6 +114,9 @@ def _stage_and_merge(rows: list[dict], stage_schema: str = QUEUE_SCHEMA) -> int:
     if not rows:
         return 0
     df = pd.DataFrame(rows)
+    # Timezone-aware datetimes staged without Parquet logical types land in
+    # TIMESTAMP_NTZ as garbage (years like 978309430), so send naive UTC.
+    df["SCHEDULED_AT"] = pd.to_datetime(df["SCHEDULED_AT"], utc=True).dt.tz_localize(None)
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -129,7 +132,7 @@ def _stage_and_merge(rows: list[dict], stage_schema: str = QUEUE_SCHEMA) -> int:
         success, _, count, output = write_pandas(
             conn=conn, df=df, table_name="IMPECT_EVENT_BACKFILL_QUEUE_STAGE",
             database=config.SNOWFLAKE_DATABASE, schema=stage_schema,
-            overwrite=False, auto_create_table=False,
+            overwrite=False, auto_create_table=False, use_logical_type=True,
         )
         if not success:
             raise RuntimeError(f"Could not stage backfill queue rows: {output}")

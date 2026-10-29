@@ -448,3 +448,50 @@ def test_scope_resolution_unions_ids_and_seasons(monkeypatch):
 
     assert rb.resolve_scope() == [10, 20, 30]
     assert seen["params"] == {"s0": "25/26", "s1": "2025"} and seen["closed"]
+
+
+def test_queue_merge_stages_naive_utc_timestamps(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    seen = {}
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=None):
+            pass
+
+    class Conn:
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_write_pandas(conn, df, table_name, **kwargs):
+        seen["df"], seen["kwargs"] = df, kwargs
+        return True, 1, len(df), []
+
+    monkeypatch.setattr(bf, "get_connection", Conn)
+    monkeypatch.setattr(bf, "write_pandas", fake_write_pandas)
+    plus_two = timezone(timedelta(hours=2))
+    rows = [
+        {"MATCH_ID": 1, "ITERATION_ID": 7, "COMPETITION_NAME": "x", "SEASON": "26/27",
+         "SCHEDULED_AT": datetime(2026, 8, 1, 16, 0, tzinfo=plus_two), "ALREADY_LOADED": False},
+        {"MATCH_ID": 2, "ITERATION_ID": 7, "COMPETITION_NAME": "x", "SEASON": "26/27",
+         "SCHEDULED_AT": None, "ALREADY_LOADED": False},
+    ]
+
+    assert bf._stage_and_merge(rows, "IMPECT_RAW") == 2
+    scheduled = seen["df"]["SCHEDULED_AT"]
+    assert scheduled.dt.tz is None
+    assert scheduled.iloc[0] == datetime(2026, 8, 1, 14, 0)     # converted to UTC, then made naive
+    assert scheduled.isna().iloc[1]
+    assert seen["kwargs"]["use_logical_type"] is True and seen["kwargs"]["schema"] == "IMPECT_RAW"
