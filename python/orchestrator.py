@@ -9,7 +9,8 @@ Drives the seven-step refresh loop in plan §2.7:
        future sources add their own extractors.
     3. dbt build --select tag:staging — typed views over raw.
     4. Identity matcher — link / mint / queue. Stamps RUN_ID on every
-       row it writes.
+       row it writes. Preceded by a CORE.PLAYERS.BIRTH_DATE refresh from
+       the provider's latest season (identity/refresh_birth_dates.py).
     5. dbt build --select tag:dimensions tag:facts tag:app_compat — the
        canonical layer plus the legacy-shape views the app reads.
     6. dbt test — schema + singular tests. Fails the run if any KPI row
@@ -60,6 +61,7 @@ from typing import Optional
 
 from python import _snowflake
 from python.identity import matcher as matcher_mod
+from python.identity import refresh_birth_dates as birth_dates_mod
 
 
 log = logging.getLogger("cafc.orchestrator")
@@ -199,6 +201,16 @@ def step_matcher(*, source_system: str, run_id: int, dry_run: bool) -> dict[str,
     return matcher_mod.run(source_system=source_system, dry_run=dry_run, run_id=run_id)
 
 
+def step_refresh_birth_dates(*, source_system: str, dry_run: bool) -> int:
+    """
+    Step 4a — refresh CORE.PLAYERS.BIRTH_DATE from the provider's latest
+    season. Runs before the matcher so (name, birth_date) matching sees
+    corrected DOBs, and before dbt so players_base picks them up.
+    """
+    log.info("[birth dates] source=%s dry_run=%s", source_system, dry_run)
+    return birth_dates_mod.run(source_system=source_system, dry_run=dry_run)
+
+
 # ---------------------------------------------------------------------------
 # The main refresh loop
 # ---------------------------------------------------------------------------
@@ -267,7 +279,11 @@ def refresh(
             log.info("[step 3/7] dbt build staging")
             step_dbt_build(select="tag:staging", target=target)
 
-            # Step 4 — identity matcher.
+            # Step 4 — refresh provider birth dates, then identity matcher.
+            log.info("[step 4/7] refresh birth dates")
+            birth_dates_changed = step_refresh_birth_dates(
+                source_system=source_system, dry_run=dry_run
+            )
             log.info("[step 4/7] identity matcher")
             counts = step_matcher(
                 source_system=source_system, run_id=run_id, dry_run=dry_run
@@ -297,7 +313,7 @@ def refresh(
                         cur,
                         run_id=run_id,
                         status="SUCCESS",
-                        notes=f"matcher: {counts}",
+                        notes=f"matcher: {counts}; birth_dates_refreshed: {birth_dates_changed}",
                     )
                 conn.commit()
             log.info("REFRESH SUCCESS  RUN_ID=%d", run_id)
