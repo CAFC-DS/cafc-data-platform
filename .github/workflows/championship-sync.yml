@@ -33,10 +33,13 @@ name: EFL Championship sync (IMPECT + DVMS)
 on:
   workflow_dispatch: {}
   schedule:
-    # GitHub Actions cron is UTC. Both possible UTC hours are triggered;
-    # the gate job selects 09:00 Europe/London (BST and GMT). Sunday(0),
+    # GitHub Actions cron is UTC. Both possible UTC hours are triggered as
+    # separate entries so the gate can tell which slot a firing was meant
+    # for (github.event.schedule) and keep the one that is 09:00
+    # Europe/London (08:00 UTC in BST, 09:00 UTC in GMT). Sunday(0),
     # Wednesday(3), Thursday(4).
-    - cron: "0 8,9 * * 0,3,4"
+    - cron: "0 8 * * 0,3,4"
+    - cron: "0 9 * * 0,3,4"
 
 concurrency:
   group: championship-sync
@@ -51,14 +54,26 @@ jobs:
     outputs:
       run: ${{ steps.london_time.outputs.run }}
     steps:
+      # GitHub frequently starts scheduled runs hours late (runs 56-60 began
+      # 15:15-17:00 UTC), so checking the wall clock at start-up skipped
+      # every one. Instead, decide from the slot the firing was scheduled
+      # for: does <today> <slot hour> UTC fall at 09:00 London?
       - name: Check London schedule
         id: london_time
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$(TZ=Europe/London date +%H:%M)" = "09:00" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
+          run=false
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            run=true
           else
-            echo "run=false" >> "$GITHUB_OUTPUT"
+            slot_hour=$(echo "$SCHEDULE" | awk '{print $2}')
+            london_hour=$(TZ=Europe/London date -d "$(date -u +%F) ${slot_hour}:00 UTC" +%H)
+            echo "Schedule '$SCHEDULE' -> slot ${slot_hour}:00 UTC = ${london_hour}:00 London (started $(date -u +%H:%M) UTC)"
+            [ "$london_hour" = "09" ] && run=true
           fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
 
   impect-championship:
     needs: gate
