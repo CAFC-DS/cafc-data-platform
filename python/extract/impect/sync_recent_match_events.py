@@ -253,6 +253,18 @@ def run(*, bootstrap_days: int, overlap_minutes: int, seasons: set[str], match_l
                         and available and scheduled_at and scheduled_at <= started_at):
                     candidates[match_id] = (iteration, match, _as_utc(match.get("lastCalculationDate")))
 
+    # IMPECT's update feeds are account-wide (every competition we license).
+    # When scoped, drop out-of-scope ids up front using the iteration
+    # catalogues enumerated above, so we never pay a paced per-match metadata
+    # lookup just to discard the result. Without this a stale cursor turns
+    # into thousands of lookups for other competitions.
+    if competition_ids is not None:
+        skipped = len(match_data_updates)
+        match_data_updates = {mid: ts for mid, ts in match_data_updates.items() if mid in scoped_match_ids}
+        skipped -= len(match_data_updates)
+        if skipped:
+            print(f"Skipped {skipped} match-data update(s) outside competition ids {sorted(competition_ids)}.")
+
     match_lookups = 0
     for match_id, updated_at in match_data_updates.items():
         match = match_updates.get(match_id)

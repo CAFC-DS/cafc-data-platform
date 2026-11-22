@@ -133,3 +133,39 @@ def test_no_scoped_iteration_is_an_error(monkeypatch):
             seed_missing=True,
             dry_run=True,
         )
+
+
+def test_scoped_sync_skips_out_of_scope_updates_without_metadata_lookup(monkeypatch):
+    past = "2026-08-20T19:45:00Z"
+    in_scope = {"id": 1, "iterationId": 2601, "scheduledDate": past, "available": True}
+    monkeypatch.setattr(sync.api, "get_iterations", lambda: {"data": [_iteration()]})
+    monkeypatch.setattr(sync.api, "get_matches", lambda _iteration_id: {"data": [in_scope.copy()]})
+    # Account-wide feed: one Championship match plus many from other competitions,
+    # none of which appear in the match-update feed (so would need a lookup).
+    updates = [{"id": 1, "date": "2026-08-21T00:00:00Z"}] + [
+        {"id": 5000 + i, "date": "2026-08-21T00:00:00Z"} for i in range(50)
+    ]
+    monkeypatch.setattr(sync.api, "get_match_data_updates", lambda _since: {"data": updates})
+    monkeypatch.setattr(sync.api, "get_match_updates", lambda _since: {"data": []})
+    monkeypatch.setattr(sync.api, "get_match_deletes", lambda _since: {"data": []})
+    looked_up = []
+    monkeypatch.setattr(
+        sync.api, "get_match_info", lambda match_id: looked_up.append(match_id) or {"data": in_scope.copy()}
+    )
+    monkeypatch.setattr(sync, "load_known_state", lambda: {1: {"status": sync.SUCCESS}})
+    monkeypatch.setattr(sync, "load_event_match_ids", lambda: {1})
+    monkeypatch.setattr(sync, "load_since", lambda default, feed_name: default)
+
+    result = sync.run(
+        bootstrap_days=14,
+        overlap_minutes=15,
+        seasons={"26/27"},
+        match_lookup_pause_seconds=0,
+        competition_ids={41},
+        feed_name="MATCH_EVENTS_V5_COMPETITION_41",
+        seed_missing=True,
+        dry_run=True,
+    )
+
+    assert looked_up == [1]
+    assert result["candidates"] == 1
