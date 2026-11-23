@@ -291,10 +291,10 @@ where ASSET_SUBTYPE = 38 and STAGED_AT is not null
 ### Extending it
 
 In this repo: `python -m python.extract.dvms.load_dvms_fixtures` (fixtures +
-small assets, weekly-scheduled via `.github/workflows/dvms-weekly.yml`, also
-manually triggerable) and `python -m python.extract.dvms.load_dvms_positional`
-(positional tracking, manual — `.github/workflows/dvms-positional-backfill.yml`).
-Both idempotent.
+small assets) and `python -m python.extract.dvms.load_dvms_positional`
+(positional tracking). Both run Sun/Wed/Thu at 09:23 London via
+`.github/workflows/championship-sync.yml`, which can also be triggered
+manually. Both idempotent.
 
 For actually *reading* the data in a new project: use
 `board-post-match-report/src/dvms/loaders/` and `.../parsers/` directly

@@ -1,15 +1,16 @@
 name: EFL Championship sync (IMPECT + DVMS)
 
-# Consolidated Sun/Wed/Thu ingestion for the EFL Championship, replacing the
-# three now-disabled workflows: impect-events-sync.yml (all competitions,
-# daily), dvms-weekly.yml (fixtures/assets, Sun/Mon/Wed/Thu), and
-# dvms-positional-backfill.yml (tracking feeds, Sun/Mon/Wed/Thu). Scoped to
+# Consolidated Sun/Wed/Thu ingestion for the EFL Championship, and the only
+# workflow in this repo. It replaced impect-events-sync.yml (all competitions,
+# daily), dvms-weekly.yml (fixtures/assets, Sun/Mon/Wed/Thu) and
+# dvms-positional-backfill.yml (tracking feeds, Sun/Mon/Wed/Thu), which were
+# removed along with impect-match-info-backfill.yml on 2026-11-23. Scoped to
 # Championship-only for both sources; see PR discussion 2026-08-23 for why
 # (IMPECT: competition id 41; DVMS: competitionId
 # 5f282b8c8cdf2d0b082cc81c / season 2026 for 26-27).
 #
-# Three jobs, gated on the same London-time check so a schedule firing at
-# either possible UTC hour only actually runs once:
+# Three jobs, gated on the same London-time check so only one of the two
+# UTC schedules below actually runs each day:
 #   impect-championship - IMPECT match events for the Championship, then
 #                          set-piece sub-phase data (corner/FK/throw-in type,
 #                          swing direction, first/second touch -- see
@@ -33,10 +34,13 @@ name: EFL Championship sync (IMPECT + DVMS)
 on:
   workflow_dispatch: {}
   schedule:
-    # GitHub Actions cron is UTC. Both possible UTC hours are triggered;
-    # the gate job selects 09:00 Europe/London (BST and GMT). Sunday(0),
-    # Wednesday(3), Thursday(4).
-    - cron: "0 8,9 * * 0,3,4"
+    # 09:23 Europe/London on Sunday(0), Wednesday(3) and Thursday(4).
+    # GitHub Actions cron is UTC, so 09:23 London is 08:23 UTC in BST and
+    # 09:23 UTC in GMT. Both are triggered as separate entries, and the gate
+    # job runs only the one that lands on 09:23 London today. The exact
+    # strings are compared in the gate, so keep the two in sync.
+    - cron: "23 8 * * 0,3,4"
+    - cron: "23 9 * * 0,3,4"
 
 concurrency:
   group: championship-sync
@@ -51,14 +55,26 @@ jobs:
     outputs:
       run: ${{ steps.london_time.outputs.run }}
     steps:
+      # GitHub often starts scheduled runs hours late, so checking the clock
+      # skipped every run. Instead, check which cron entry fired
+      # (github.event.schedule) against today's London UTC offset.
       - name: Check London schedule
         id: london_time
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          FIRED_CRON: ${{ github.event.schedule }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$(TZ=Europe/London date +%H:%M)" = "09:00" ]; then
+          if [ "$(TZ=Europe/London date +%z)" = "+0100" ]; then
+            london_nine="23 8 * * 0,3,4"
+          else
+            london_nine="23 9 * * 0,3,4"
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] || [ "$FIRED_CRON" = "$london_nine" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "event=$EVENT_NAME fired='$FIRED_CRON' want='$london_nine'"
 
   impect-championship:
     needs: gate
